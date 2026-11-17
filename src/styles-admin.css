@@ -1,0 +1,320 @@
+/* 4단계: 관리자 화면 확장 */
+
+.warn {
+  color: #ffd27a;
+}
+.tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.15);
+  vertical-align: middle;
+}
+.seg {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+  font-family: var(--font-body);
+}
+.seg button {
+  padding: 3px 10px;
+}
+.big-btn {
+  font-size: 18px;
+  padding: 12px 20px;
+  border-radius: 12px;
+}
+.pulse-btn {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* 경주 조작은 휴대폰에서도 항상 손 닿는 곳에 */
+.race-control {
+  position: sticky;
+  top: 8px;
+  z-index: 20;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.person .dot {
+  font-size: 11px;
+}
+.person.bot {
+  opacity: 0.7;
+}
+.person button.link {
+  padding: 0 2px;
+}
+.status-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+.status-list a,
+.admin-card p a {
+  color: var(--gold);
+}
+.history .test-row {
+  opacity: 0.65;
+}
+.danger-zone {
+  border-color: #ff8a8a;
+}
+
+/* ───── 화면 안 확인 창 ───── */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.6);
+  animation: fadein 0.15s ease-out;
+}
+.dialog {
+  width: min(440px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--red-deep);
+  border: 2px solid var(--gold);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+.dialog.danger {
+  border-color: #ff8a8a;
+}
+.dialog.wide-dialog {
+  width: min(640px, 100%);
+}
+.dialog h2 {
+  margin: 0;
+  font-family: var(--font-title);
+  font-weight: 400;
+  color: var(--gold);
+}
+.dialog-body p {
+  margin: 0 0 6px;
+}
+.dialog input {
+  font: inherit;
+  font-size: 18px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--gold-dark);
+  background: #fff;
+  color: var(--ink);
+}
+.dialog-actions {
+  justify-content: flex-end;
+}
+
+.detail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.detail-list li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.detail-list li.top1 {
+  background: rgba(245, 197, 66, 0.2);
+  border: 1px solid var(--gold);
+}
+.detail-list li.top2 {
+  background: rgba(217, 217, 217, 0.12);
+  border: 1px solid var(--silver);
+}
+.detail-list .r {
+  width: 2em;
+  text-align: right;
+  font-family: var(--font-title);
+}
+.detail-list .n {
+  flex: 1;
+  font-weight: 700;
+}
+.detail-list .t {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+.detail-list .chip {
+  font-size: 13px;
+}
+
+/* 비상 모드 안내 (대형 화면 /demo?cached=1) */
+.emergency-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 15;
+  padding: 8px 16px;
+  text-align: center;
+  font-weight: 700;
+  background: #e0a526;
+  color: #1a0a0a;
+}
+.emergency-strip.bad {
+  background: #ff8a8a;
+}
+
+/* 5단계: 소리 켜기 버튼 (대형 화면) */
+.sound-toggle {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 120;
+  padding: 6px 10px;
+  font-size: 18px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  opacity: 0.55;
+  transition: opacity 0.2s;
+}
+.sound-toggle:hover {
+  opacity: 1;
+}
+.sound-toggle.locked {
+  opacity: 1;
+  font-size: 16px;
+  padding: 10px 16px;
+  background: var(--gold);
+  color: var(--ink);
+  border: 2px solid #fff;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* 5단계: 휴대폰 — 내 말 이벤트 순간 강조 */
+.my-event.flash {
+  animation: event-flash 0.9s ease-out;
+}
+@keyframes event-flash {
+  0% {
+    transform: scale(1.25);
+    box-shadow: 0 0 0 6px rgba(245, 197, 66, 0.8);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(245, 197, 66, 0);
+  }
+}
+
+/* 6단계: 휴대폰 입상 축하 꽃가루 (CSS 만, 가벼움) */
+.race-panel {
+  position: relative;
+  overflow: hidden;
+}
+.confetti {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.confetti span {
+  position: absolute;
+  top: -12px;
+  border-radius: 2px;
+  animation-name: confetti-fall;
+  animation-timing-function: linear;
+  animation-iteration-count: 3;
+}
+@keyframes confetti-fall {
+  to {
+    top: 110%;
+    transform: rotate(540deg) translateX(30px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .confetti {
+    display: none;
+  }
+}
+.page-loading {
+  margin-top: 30vh;
+}
+
+/* 대형 화면: 서버 값 받기 전 / 연결 실패 안내 */
+.screen-msg {
+  grid-template-columns: 1fr;
+}
+.screen-msg-body {
+  display: grid;
+  place-items: center;
+  font-family: var(--font-title);
+  font-size: 96px;
+  color: var(--cream);
+}
+.results-note {
+  margin: 0 0 1.5vh;
+  max-width: 1100px;
+  padding: 10px 18px;
+  border-radius: 12px;
+  background: rgba(245, 197, 66, 0.15);
+  border: 1px solid var(--gold);
+  font-size: clamp(14px, 1.3vw, 22px);
+  text-align: center;
+}
+
+/* 정원 20명 이하: 슬롯을 크게 (5칸 × 4줄) */
+.lobby-20 .slot {
+  gap: 16px;
+  padding: 0 18px;
+}
+.lobby-20 .slot-no {
+  width: 76px;
+  height: 76px;
+  font-size: 40px;
+}
+.lobby-20 .slot-name {
+  font-size: 46px;
+}
+.screen-msg-body {
+  flex-direction: column;
+  gap: 40px;
+  text-align: center;
+}
+.screen-msg-hint {
+  font-family: var(--font-body);
+  font-size: 34px;
+  opacity: 0.85;
+  max-width: 1400px;
+}
+.emergency-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px dashed var(--gold);
+  background: rgba(0, 0, 0, 0.2);
+}
+.emergency-tip p {
+  margin: 0;
+}
+.btn-like {
+  align-self: flex-start;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 2px solid var(--gold);
+  background: var(--red);
+  color: #fff !important;
+  font-weight: 700;
+  text-decoration: none;
+}
