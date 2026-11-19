@@ -189,6 +189,21 @@ export class RaceScene extends Phaser.Scene {
   private placed: number[] = [];
   /** 3D 첫 화면 전 가림막 */
   private prepCover!: Phaser.GameObjects.Container;
+  /** 중계 구도 표시 (개별 추적 · 선두 다툼) */
+  private shotTag!: Phaser.GameObjects.Text;
+  /**
+   * 개그 자막: 실제로 일어난 상황(추격·작전 추월·선두 교체·밀집·같은 작전 반복·결승 직전 접전)에만,
+   * 번호·이름을 넣어 짧게. 작전 선택 시간·결승 판독 중에는 기다렸다가, 자막끼리 겹치지 않게 간격을 둠. 순수 연출
+   */
+  private gagLine!: Phaser.GameObjects.Container;
+  private gagLastAt = -1e9;
+  private gagPending: { text: string; at: number } | null = null;
+  private gagRecent: string[] = [];
+  private gagTurn = new Map<string, number>();
+  private gagShownTypes = new Set<string>();
+  private lastBunchTick = -1000;
+  private lastSurgeTick = -1000;
+  private shotKey = '';
   private lastIdle3d = 0;
   /** 3D 중계 렌더러 (없으면 기존 2D 트랙). 말·트랙·카메라는 3D 가, 번호·자막·순위표는 이 장면이 그림 */
   private view3d: Race3D | null = null;
@@ -271,6 +286,13 @@ export class RaceScene extends Phaser.Scene {
     this.leadCandSince = 0;
     this.leadCandMargin = 0;
     this.leadCalledAt.clear();
+    this.gagPending = null;
+    this.gagLastAt = -1e9;
+    this.gagShownTypes.clear();
+    this.lastBunchTick = -1000;
+    this.lastSurgeTick = -1000;
+    this.gagLine?.setVisible(false);
+    this.shownOrder = [];
     this.badgeFlash.clear();
     this.lastPassCallTick = -1000;
     this.finalStretchShown = false;
@@ -360,6 +382,26 @@ export class RaceScene extends Phaser.Scene {
       .text((PANEL_X - 10) / 2, (HEADER_H + VIEW_H) / 2, '🏇 경주 준비 중…', { fontFamily: FONT_TITLE, fontSize: '72px', color: hex(THEME.gold) })
       .setOrigin(0.5);
     this.prepCover = this.add.container(0, 0, [coverBg, coverText]).setDepth(29).setVisible(false);
+    const gagBg = this.add.rectangle(0, 0, 600, 72, 0xfff6e0, 0.95).setStrokeStyle(4, THEME.red).setName('bg');
+    const gagText = this.add
+      .text(0, 0, '', { fontFamily: FONT_TITLE, fontSize: '46px', color: '#7a0f12' })
+      .setOrigin(0.5)
+      .setName('text');
+    this.gagLine = this.add
+      .container((TRACK_X0 + TRACK_X1) / 2, TRACK_TOP + 150, [gagBg, gagText])
+      .setDepth(54)
+      .setVisible(false);
+    this.shotTag = this.add
+      .text(TRACK_X0 + 14, TRACK_BOTTOM - 12, '', {
+        fontFamily: FONT_TITLE,
+        fontSize: '40px',
+        color: '#ffffff',
+        backgroundColor: 'rgba(26,5,5,0.82)',
+        padding: { x: 14, y: 6 },
+      })
+      .setOrigin(0, 1)
+      .setDepth(54)
+      .setVisible(false);
 
     this.ready = true;
     if (this.pending) {
@@ -880,7 +922,28 @@ export class RaceScene extends Phaser.Scene {
         mode: this.show === 'replay' ? 'replay' : tick >= race.totalTicks ? 'over' : 'live',
         finishLock: this.finishLock,
         paused,
+        tacticOpen: this.tacticsOn && this.windows.some((w) => elapsed >= w.openMs && elapsed < w.closeMs),
       });
+      // 지금 구도가 한 말·선두 다툼이면 왼쪽 위에 번호·이름 (전체 위치는 아래 미니맵·오른쪽 TOP 5 로 계속 확인)
+      const shot = this.view3d.shotInfo;
+      let key = '';
+      if (this.show === 'live' && tick < race.totalTicks) {
+        if (shot.type === 'follow' && shot.lanes.length) {
+          const e = race.entrants[shot.lanes[0]!]!;
+          key = `🎥 ${e.id}번 · ${e.name}`;
+        } else if (shot.type === 'battle' && shot.lanes.length > 1) {
+          key = `🎥 선두 다툼 · ${shot.lanes.map((l) => `${race.entrants[l]!.id}번`).join(' · ')}`;
+        }
+      }
+      if (key !== this.shotKey) {
+        this.shotKey = key;
+        this.shotTag.setText(key).setVisible(!!key);
+        if (key) {
+          this.tweens.killTweensOf(this.shotTag);
+          this.shotTag.setAlpha(0);
+          this.tweens.add({ targets: this.shotTag, alpha: 1, duration: 250 });
+        }
+      }
       // 3D 첫 화면을 못 그렸으면(그래픽 준비 지연·오류) "경주 준비 중" 으로 가림. 경주 시계는 서버 기준 그대로
       this.prepCover.setVisible(!this.view3d.ready);
     }
@@ -984,6 +1047,9 @@ export class RaceScene extends Phaser.Scene {
     // 상단 정보
     this.timerText.setText(formatTime(ms));
     this.updateTacticBar(race, elapsed, tick);
+    const tacticOpenNow = this.tacticsOn && this.windows.some((w) => elapsed >= w.openMs && elapsed < w.closeMs);
+    this.pumpGag(paused || this.show !== 'live' || tacticOpenNow || tick >= race.totalTicks || (this.finishLock && finishedCountAtTick(race, tick) > 0));
+    if (this.show !== 'live' && this.gagLine.visible) this.gagLine.setVisible(false);
     if (this.tacticBar.visible) this.miniGfx.clear();
     else this.drawMinimap(prog);
 
@@ -999,7 +1065,8 @@ export class RaceScene extends Phaser.Scene {
     const n = race.entrants.length;
 
     // TOP 5 (경주 중). 최종 결과표에서는 전체 순위
-    const ranking = rankingAtTick(race, tick);
+    // 거의 나란한 말끼리는 0.3m 이상 앞서야 표시 순서를 바꿈 → 순위표가 매 틱 떨리지 않음 (공식 순위·결과와 무관한 표시용)
+    const ranking = this.stableRanking(race, tick, rankingAtTick(race, tick));
     // 등번호 겹침 정리는 순위 순서로 (선두권 번호가 항상 맨 위·제자리)
     if (ranking.some((l, k) => this.lastRanking[k] !== l)) {
       for (let k = ranking.length - 1; k >= 0; k--) {
@@ -1064,11 +1131,65 @@ export class RaceScene extends Phaser.Scene {
       }
     }
 
-    // 작전이 적용된 순간: 그 말들의 등번호를 잠깐 강조
+    // 작전이 적용된 순간: 그 말들의 등번호를 잠깐 강조 · 같은 작전을 3번 이상 연속 고른 말이 있으면 개그
     if (live && this.show === 'live' && this.tacticsOn) {
       for (const w of this.windows) {
         if (!(prev < w.applyTick && w.applyTick <= tick)) continue;
-        for (const x of race.tactics ?? []) if (x.window === w.no && x.applied) this.badgeFlash.set(x.lane, this.time.now + 1500);
+        let best: { lane: number; k: number } | null = null;
+        for (const x of race.tactics ?? []) {
+          if (x.window !== w.no || !x.applied) continue;
+          this.badgeFlash.set(x.lane, this.time.now + 1500);
+          let k = 1;
+          for (let ww = w.no - 1; ww >= 1; ww--) {
+            const prevRec = race.tactics!.find((y) => y.window === ww && y.lane === x.lane);
+            if (prevRec?.tactic === x.tactic) k++;
+            else break;
+          }
+          if (k >= 3 && (!best || k > best.k || (k === best.k && (rankOf.get(x.lane) ?? 99) < (rankOf.get(best.lane) ?? 99)))) best = { lane: x.lane, k };
+        }
+        if (best) {
+          this.gag('repeat', { p: this.tag(race, best.lane), k: String(best.k) });
+          this.view3d?.react(best.lane, 'nod', 1200);
+        }
+      }
+    }
+
+    if (live && this.show === 'live' && done === 0 && tick * TICK_MS > 4000) {
+      // 추격: 3초 사이 3계단 이상 올라 5위 안에 든 말 (중위권·후미에서)
+      if (tick % 10 === 0 && tick > 60 && tick - this.lastSurgeTick >= 120) {
+        const before = rankingAtTick(race, tick - 60);
+        for (let r = 1; r < Math.min(5, n); r++) {
+          const lane = ranking[r]!;
+          const was = before.indexOf(lane);
+          if (was >= 5 && was - r >= 3) {
+            this.lastSurgeTick = tick;
+            this.gag('surge', { p: this.tag(race, lane) });
+            this.view3d?.react(lane, 'cheer', 1100);
+            break;
+          }
+        }
+      }
+      // 밀집: 4마리 이상이 3m 안에 붙어 달림 (한 경기 몇 번만)
+      if (tick % 20 === 0 && tick - this.lastBunchTick >= 400) {
+        const ps = ranking.map((l) => [l, positionAtTick(race, tick, l)] as const);
+        for (let a = 0; a + 3 < ps.length; a++) {
+          if (ps[a]![1] - ps[a + 3]![1] <= 3000) {
+            this.lastBunchTick = tick;
+            const list = ps.slice(a, a + 4).map(([l]) => `${race.entrants[l]!.id}`).join('·') + '번';
+            this.gag('bunch', { list });
+            break;
+          }
+        }
+      }
+      // 결승 직전 접전: 선두가 92% 이상, 1·2위가 1m 안 (한 번)
+      if (!this.gagShownTypes.has('close') && n >= 2) {
+        const p0 = positionAtTick(race, tick, ranking[0]!);
+        const p1 = positionAtTick(race, tick, ranking[1]!);
+        if (p0 >= TRACK_LENGTH * 0.92 && p0 < TRACK_LENGTH && p0 - p1 <= 1000) {
+          this.gagShownTypes.add('close');
+          this.gag('close', { list: `${race.entrants[ranking[0]!]!.id}번·${race.entrants[ranking[1]!]!.id}번` });
+          this.gagLastAt = -1e9; // 결승 직전 한 줄은 간격 무시하고 바로
+        }
       }
     }
 
@@ -1086,6 +1207,11 @@ export class RaceScene extends Phaser.Scene {
         for (const g of gains.slice(0, 2)) {
           const e = race.entrants[g.x.lane]!;
           this.pushToast(`${TACTIC_SPECS[g.x.tactic].emoji} ${e.id}번 ${e.name} · ${g.a + 1}위 → ${g.b + 1}위`, 'call', 2);
+          this.view3d?.focusOn(g.x.lane);
+          if (g === gains[0]) {
+            this.gag('tactic', { p: this.tag(race, g.x.lane) });
+            this.view3d?.react(g.x.lane, 'cheer', 1300);
+          }
         }
       }
     }
@@ -1119,6 +1245,12 @@ export class RaceScene extends Phaser.Scene {
         this.lastLeader = leaderLane;
         this.pushToast(`👑 ${l.id}번 ${l.name}, 선두 탈환!`, 'call', 3);
         sfx.play('lead');
+        // 개그: 방금 선두를 내준 말
+        const prevLead = this.lastLeader;
+        if (prevLead >= 0 && prevLead !== leaderLane) {
+          this.gag('lead', { q: this.tag(race, prevLead) });
+          this.view3d?.react(prevLead, 'shock', 1100);
+        }
       }
       // 새로고침·재접속 직후(시간 건너뜀)에는 지금 선두를 기준으로 삼고 알리지 않음
       if (this.lastLeader === -1 || !live) this.lastLeader = leaderLane;
@@ -1157,6 +1289,93 @@ export class RaceScene extends Phaser.Scene {
       if (live) this.startReplay(race);
       else this.showWinnerBanner(race);
     }
+  }
+
+
+  // ───────────────────────── 개그 자막 ─────────────────────────
+
+  private static GAGS: Record<string, string[]> = {
+    surge: ['{p}, 회식 2차 소식에 급가속', '{p}, 막차 놓칠까 봐 전력 질주', '{p}, 퇴근 10분 전 스퍼트', '{p}, 단톡방 알림 보고 각성'],
+    tactic: ['{p}, 팀플 때도 이 정도로 달렸으면', '{p}, 작전 짠 사람 칭찬해', '{p}, 이게 바로 계획대로'],
+    lead: ['{q}: 방금까지 우승 소감 준비했는데', '{q}: 선두 자리 잠깐 빌려준 거래요', '{q}: 아까 그 1등 누구였죠?'],
+    bunch: ['{list} 앞말과 거리 두기 실패', '{list} 지금 단체 사진 찍는 중', '{list} 이 정도면 한 몸'],
+    repeat: ['{p}, 작전은 하나 확신은 {k}번', '{p}, 한 우물만 파는 중 ({k}연속)', '{p}, 고집도 실력이다 ({k}연속)'],
+    close: ['{list} 우승 소감 일단 보류', '{list} 사진 판독 각', '{list} 코 하나 차이 예약'],
+  };
+
+  /** 종류별 문구를 돌아가며 고르고, 최근에 쓴 문구는 피함 */
+  private gag(type: string, vars: Record<string, string>): void {
+    const pool = RaceScene.GAGS[type]!;
+    let idx = this.gagTurn.get(type) ?? (Math.abs(this.race?.seed ?? 0) % pool.length);
+    let text = '';
+    for (let tries = 0; tries < pool.length; tries++) {
+      text = pool[idx % pool.length]!.replace(/\{(\w+)\}/g, (_, k: string) => vars[k] ?? '');
+      idx++;
+      if (!this.gagRecent.includes(pool[(idx - 1) % pool.length]!)) break;
+    }
+    this.gagTurn.set(type, idx);
+    this.gagRecent.push(pool[(idx - 1) % pool.length]!);
+    if (this.gagRecent.length > 8) this.gagRecent.shift();
+    this.gagPending = { text, at: this.time.now };
+  }
+
+  /** 매 프레임: 기다리는 개그 자막을 보여줄 수 있으면 표시 (작전 선택·결승 판독·리플레이 중엔 대기, 6초 간격) */
+  private pumpGag(blocked: boolean): void {
+    const g = this.gagPending;
+    if (!g) return;
+    if (this.time.now - g.at > 3500) {
+      this.gagPending = null; // 너무 늦은 개그는 버림 (상황이 지났음)
+      return;
+    }
+    if (blocked || this.time.now - this.gagLastAt < 6000) return;
+    this.gagPending = null;
+    this.gagLastAt = this.time.now;
+    const bg = this.gagLine.getByName('bg') as Phaser.GameObjects.Rectangle;
+    const t = this.gagLine.getByName('text') as Phaser.GameObjects.Text;
+    t.setText(`😆 ${g.text}`).setScale(1);
+    const maxW = TRACK_X1 - TRACK_X0 - 160;
+    if (t.width > maxW) t.setScale(maxW / t.width);
+    bg.setSize(t.displayWidth + 60, 72);
+    this.tweens.killTweensOf(this.gagLine);
+    this.gagLine.setVisible(true).setAlpha(0).setScale(0.9).setAngle(-2);
+    this.tweens.add({ targets: this.gagLine, alpha: 1, scale: 1, angle: 0, duration: 220, ease: 'Back.Out' });
+    this.tweens.add({ targets: this.gagLine, alpha: 0, delay: 2800, duration: 300, onComplete: () => this.gagLine.setVisible(false) });
+  }
+
+  private tag(race: RaceResult, lane: number): string {
+    const e = race.entrants[lane]!;
+    return `${e.id}번 ${e.name}`;
+  }
+
+  /** 표시용 순위: 직전 표시 순서에서 출발해, 실제로 0.3m 이상 앞선 경우(또는 결승 통과)에만 자리를 바꿈 */
+  private shownOrder: number[] = [];
+  private stableRanking(race: RaceResult, tick: number, truth: number[]): number[] {
+    const n = truth.length;
+    if (tick >= race.totalTicks || this.shownOrder.length !== n) {
+      this.shownOrder = truth.slice();
+      return this.shownOrder;
+    }
+    const rank = new Int32Array(n);
+    truth.forEach((l, r) => (rank[l] = r));
+    const order = this.shownOrder.slice();
+    const done = (l: number) => race.finishTick[l]! !== -1 && race.finishTick[l]! <= tick;
+    for (let pass = 0; pass < n; pass++) {
+      let moved = false;
+      for (let k = 0; k < n - 1; k++) {
+        const a = order[k]!;
+        const b = order[k + 1]!;
+        if (rank[b]! >= rank[a]!) continue;
+        const margin = positionAtTick(race, tick, b) - positionAtTick(race, tick, a);
+        if (margin >= 300 || done(a) || done(b)) {
+          order[k] = b;
+          order[k + 1] = a;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    this.shownOrder = order;
+    return order;
   }
 
   // ───────────────────────── 결승 리플레이 · 세리머니 ─────────────────────────
@@ -1747,11 +1966,11 @@ export class RaceScene extends Phaser.Scene {
     if (this.tacticsOn && this.show === 'live' && elapsed >= 0) {
       for (const w of this.windows) {
         if (elapsed >= w.openMs && elapsed < w.closeMs) {
-          text = `🎯 ${w.no}차 작전 타임 · ${Math.ceil((w.closeMs - elapsed) / 1000)}초   📱 휴대폰에서 고르세요`;
+          text = `🎯 작전 선택 ${w.no}/${this.windows.length} · ${Math.ceil((w.closeMs - elapsed) / 1000)}초   📱 휴대폰에서 고르세요`;
           break;
         }
         if (elapsed >= w.closeMs && tick < w.applyTick) {
-          text = `🎯 ${w.no}차 작전 마감 · 곧 적용!`;
+          text = `🎯 작전 ${w.no}/${this.windows.length} 마감 · 곧 적용!`;
           break;
         }
         if (tick >= w.applyTick && tick < w.applyTick + 70) {
@@ -1760,10 +1979,10 @@ export class RaceScene extends Phaser.Scene {
             .filter((x) => x.window === w.no && x.applied)
             .sort((x, y) => (rank.get(x.lane) ?? 99) - (rank.get(y.lane) ?? 99));
           if (recs.length === 0) {
-            text = `🎯 ${w.no}차 작전 · 모두 기본 페이스`;
+            text = `🎯 작전 ${w.no}/${this.windows.length} · 모두 기본 페이스`;
           } else {
             const names = recs.slice(0, 4).map((x) => `${TACTIC_SPECS[x.tactic].emoji} ${x.id}번 · ${TACTIC_SPECS[x.tactic].label}`);
-            text = `🎯 ${w.no}차 작전 적용  ${names.join('  ')}${recs.length > 4 ? `  외 ${recs.length - 4}마리` : ''}`;
+            text = `🎯 작전 ${w.no}/${this.windows.length} 적용  ${names.join('  ')}${recs.length > 4 ? `  외 ${recs.length - 4}마리` : ''}`;
           }
           break;
         }

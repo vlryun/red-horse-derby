@@ -4,6 +4,7 @@ import {
   REVEAL_GRACE_MS,
   isSupportedEngine,
   simulateRaceVersion,
+  tacticWindowCount,
   tacticWindows,
   type FinishRecord,
   type RaceResult,
@@ -148,7 +149,7 @@ export function useRaceSync(lobby: Lobby | null): RaceSync {
   const tacNow = tacticsOn && tac && current && tac.raceId === current.id ? tac : null;
   const tacticsClosed = tacNow?.closed ?? [];
   const tacticsKey = tacNow ? JSON.stringify(tacNow.list) : '';
-  const tacticsComplete = !tacticsOn || tacticsClosed.length >= 3;
+  const tacticsComplete = !tacticsOn || tacticsClosed.length >= tacticWindowCount(current?.engineVersion ?? 0);
   // 이 앱이 가진 엔진(현재 + 이전 버전 보관본)으로 계산할 수 없는 경주일 때만 "업데이트 필요"
   const engineMismatch = !!current && !isSupportedEngine(current.engineVersion);
 

@@ -55,7 +55,7 @@ describe('결정론 (모든 기기에서 동일 결과)', () => {
 
   it('GOLDEN: 엔진 로직이 바뀌면 실패 → ENGINE_VERSION 을 올리고 값 갱신할 것 (v3 = v4 작전 없음)', () => {
     const r = simulateRaceVersion(3, { seed: 20261127, entrants: fifty });
-    expect(ENGINE_VERSION).toBe(6);
+    expect(ENGINE_VERSION).toBe(8);
     expect(r.engineVersion).toBe(3);
     expect({
       hash: r.hash,
@@ -332,7 +332,7 @@ describe('이전 버전 엔진 보관 (배포 직후 예전 화면에서 시작�
   it('현재 버전은 simulateRace 와 같고, 모르는 버전은 거부', () => {
     const input = { seed: 77, entrants: demoEntrants(12), raceSeconds: 45 };
     expect(simulateRaceVersion(ENGINE_VERSION, input).hash).toBe(simulateRace(input).hash);
-    expect(isSupportedEngine(2) && isSupportedEngine(3) && isSupportedEngine(4) && isSupportedEngine(ENGINE_VERSION)).toBe(true);
+    expect(isSupportedEngine(2) && isSupportedEngine(3) && isSupportedEngine(4) && isSupportedEngine(5) && isSupportedEngine(6) && isSupportedEngine(7) && isSupportedEngine(ENGINE_VERSION)).toBe(true);
     expect(isSupportedEngine(1)).toBe(false);
     expect(() => simulateRaceVersion(99, input)).toThrow();
   });
@@ -353,23 +353,24 @@ describe('v4 참가자 작전', () => {
     }
   });
 
-  it('세 번의 창: 30~180초 모든 설정에서 겹치지 않고, 효과는 1등 도착 전에 끝난다', () => {
-    for (let s = RACE_SECONDS.min; s <= RACE_SECONDS.max; s++) {
-      const w = tacticWindows(s);
-      expect(w).toHaveLength(3);
-      expect(w[0]!.openMs).toBeGreaterThan(0);
-      for (let k = 0; k < 3; k++) {
-        const x = w[k]!;
-        expect(x.closeMs - x.openMs).toBeGreaterThanOrEqual(3500);
-        expect(x.closeMs - x.openMs).toBeLessThanOrEqual(6000);
-        expect(x.applyTick * TICK_MS).toBeGreaterThan(x.closeMs);
-        // 다음 창은 앞 창의 작전이 적용된 뒤에 열림 (폰이 바뀐 체력을 알고 고름)
-        if (k > 0) expect(x.openMs).toBeGreaterThan(w[k - 1]!.applyTick * TICK_MS);
+  it('작전 창: v7 3번 · v8 5번, 30~180초 모든 설정에서 겹치지 않고(앞 창 적용 뒤 열림), 효과는 1등 도착 전에 끝난다', () => {
+    for (const [ver, cnt] of [[7, 3], [8, 5]] as const) {
+      for (let s = RACE_SECONDS.min; s <= RACE_SECONDS.max; s++) {
+        const w = tacticWindows(s, ver);
+        expect(w).toHaveLength(cnt);
+        expect(w[0]!.openMs).toBeGreaterThan(0);
+        for (let k = 0; k < cnt; k++) {
+          const x = w[k]!;
+          expect(x.closeMs - x.openMs).toBeGreaterThanOrEqual(3000);
+          expect(x.closeMs - x.openMs).toBeLessThanOrEqual(6000);
+          expect(x.applyTick * TICK_MS).toBeGreaterThan(x.closeMs);
+          if (k > 0) expect(x.openMs).toBeGreaterThan(w[k - 1]!.applyTick * TICK_MS);
+        }
+        // 마지막 효과 끝 → 1등 도착(≈ 설정 시간)까지 v7 20%·v8 10% 이상 여유 (30초 경기 v8: 약 4초)
+        expect(w[cnt - 1]!.endTick * TICK_MS).toBeLessThan(s * 1000 * (ver >= 8 ? 0.9 : 0.8));
       }
-      expect(w[2]!.endTick * TICK_MS).toBeLessThan(s * 1000 * 0.8);
     }
-    // 70초: 창 길이 6초
-    expect(tacticWindows(70).map((x) => x.closeMs - x.openMs)).toEqual([6000, 6000, 6000]);
+    expect(tacticWindows(70, 7).map((x) => x.closeMs - x.openMs)).toEqual([6000, 6000, 6000]);
   });
 
   it('10·20마리 실제 경주에서 세 창이 모두 1등 도착 전에 열리고 닫힌다', () => {
@@ -456,7 +457,7 @@ describe('v4 참가자 작전', () => {
     const id = entrants[0]!.id;
     expect(() => simulateRace({ seed: 1, entrants, tactics: [{ id, window: 1, tactic: 'SAVE' }, { id, window: 1, tactic: 'CHASE' }] })).toThrow(RaceInputError);
     expect(() => simulateRace({ seed: 1, entrants, tactics: [{ id: 999, window: 1, tactic: 'SAVE' }] })).toThrow(RaceInputError);
-    expect(() => simulateRace({ seed: 1, entrants, tactics: [{ id, window: 4, tactic: 'SAVE' }] })).toThrow(RaceInputError);
+    expect(() => simulateRace({ seed: 1, entrants, tactics: [{ id, window: 6, tactic: 'SAVE' }] })).toThrow(RaceInputError);
   });
 
   it('작전이 있으면 경주마다 결과가 실제로 달라질 수 있다 (20마리 중 몇 경기는 우승자가 바뀜)', () => {
@@ -565,5 +566,48 @@ describe('v6 작전 수치', () => {
     const r = simulateRaceVersion(5, { seed: 5, entrants, tactics: [{ id, window: 1, tactic: 'SAVE' }] });
     expect(r.engineVersion).toBe(5);
     expect(r.tactics![0]).toMatchObject({ applied: true, staminaAfter: 80 });
+  });
+});
+
+describe('v7 추격 보정 (선두 독주 완화)', () => {
+  const runaway = (v: number) => {
+    let c = 0;
+    for (let k = 0; k < 80; k++) {
+      const r = simulateRaceVersion(v, { seed: seedOf(k), entrants: demoEntrants(10) });
+      const n = 10;
+      for (let t = 1; t <= r.totalTicks; t++) {
+        const ps = Array.from({ length: n }, (_, i) => r.positions[t * n + i]!).sort((a, b) => b - a);
+        if (ps[0]! >= TRACK_LENGTH * 0.62) break;
+        if (ps[0]! - ps[1]! >= 20_000) {
+          c++;
+          break;
+        }
+      }
+    }
+    return c;
+  };
+
+  it('선두가 20m 이상 혼자 달아나는 경기가 v6 보다 줄어든다', () => {
+    expect(runaway(7)).toBeLessThan(runaway(6));
+  });
+
+  it('보정은 실제 주행에만 들어가고 틱마다 위치가 갑자기 튀지 않는다 (한 틱 이동량이 기본 속도의 2배를 넘지 않음, 이벤트 제외)', () => {
+    const r = simulateRace({ seed: 31, entrants: demoEntrants(20) });
+    const n = 20;
+    const active = (t: number, lane: number) => r.events.some((e) => e.horse === lane && e.tick <= t && t < e.endTick);
+    for (let t = 2; t < r.totalTicks; t++) {
+      for (let i = 0; i < n; i++) {
+        if (active(t, i) || (r.finishTick[i]! !== -1 && r.finishTick[i]! <= t)) continue;
+        const step = r.positions[t * n + i]! - r.positions[(t - 1) * n + i]!;
+        expect(step).toBeLessThanOrEqual(r.baseSpeed * 2);
+      }
+    }
+  });
+
+  it('결승 직전(선두 90% 이후)에는 보정이 없다: 같은 시드의 v6 와 그 구간 속도 규칙이 같음 → 결과는 시드로 재현', () => {
+    const input = { seed: 77, entrants: demoEntrants(12), raceSeconds: 45 };
+    expect(simulateRace(input).hash).toBe(simulateRace(input).hash);
+    expect(simulateRaceVersion(6, input).engineVersion).toBe(6);
+    expect(simulateRace(input).engineVersion).toBe(ENGINE_VERSION);
   });
 });

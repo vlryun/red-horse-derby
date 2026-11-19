@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { EventType, RaceEvent, TacticType } from '../engine';
 import { coatColor, horseColor } from '../game/palette';
 
@@ -15,9 +16,90 @@ import { coatColor, horseColor } from '../game/palette';
 export const VIEW_W = 1920;
 export const VIEW_H = 1080;
 
-const S1 = 280; // 출발 직선 끝
-const S2 = 620; // 코너 끝
-const R = (S2 - S1) / Math.PI; // 안쪽 난간 반지름 ≈ 108m
+/**
+ * 코스 (단위 m, 진행 거리 기준). 출발 직선 → 완만한 왼쪽 → S자(오른쪽·왼쪽) → 짧은 직선 → 큰 왼쪽 커브 → 결승 직선.
+ * 반지름은 모두 95m 이상 (가장 안쪽 레인도 65m 이상 → 급하게 꺾이지 않음). 겹치는 구간 없음 (서로 154m 이상 떨어짐).
+ * 진행 거리(엔진 값)는 레인과 무관하게 같고, 화면 위치만 이 코스를 따라 그림 → 안쪽·바깥쪽 경로 차이로 이득 없음.
+ */
+type Seg = { len: number; radius?: number; deg?: number };
+const COURSE: Seg[] = [
+  { len: 100 },
+  { len: 0, radius: 240, deg: 20 },
+  { len: 0, radius: 110, deg: -55 },
+  { len: 0, radius: 110, deg: 55 },
+  { len: 40 },
+  { len: 0, radius: 95, deg: 140 },
+  { len: 500 },
+];
+const S_MIN = -120;
+const S_MAX = 1120;
+const PX = new Float64Array(S_MAX - S_MIN + 2);
+const PZ = new Float64Array(S_MAX - S_MIN + 2);
+const PH = new Float64Array(S_MAX - S_MIN + 2);
+/** 결승 직선이 시작되는 거리 · 큰 커브가 시작되는 거리 (카메라 연출용) */
+let FINAL_FROM = 0;
+let BIG_CURVE_FROM = 0;
+(() => {
+  // s < 0: 출발선 뒤로 곧게
+  for (let s = S_MIN; s < 0; s++) {
+    PX[s - S_MIN] = s;
+    PZ[s - S_MIN] = 0;
+    PH[s - S_MIN] = 0;
+  }
+  let x = 0;
+  let z = 0;
+  let h = 0;
+  let k = -S_MIN;
+  const put = () => {
+    if (k < PX.length) {
+      PX[k] = x;
+      PZ[k] = z;
+      PH[k] = h;
+      k++;
+    }
+  };
+  let dist = 0;
+  for (const seg of COURSE) {
+    const n = seg.radius ? Math.round((seg.radius * Math.abs(seg.deg!) * Math.PI) / 180) : seg.len;
+    const dh = seg.radius ? ((seg.deg! * Math.PI) / 180) / n : 0;
+    if (seg.radius && seg.deg! > 120) BIG_CURVE_FROM = dist;
+    if (!seg.radius && seg === COURSE[COURSE.length - 1]) FINAL_FROM = dist;
+    for (let i = 0; i < n; i++) {
+      put();
+      h += dh;
+      x += Math.cos(h);
+      z -= Math.sin(h);
+      dist++;
+    }
+  }
+  while (k < PX.length) put(), (x += Math.cos(h)), (z -= Math.sin(h));
+})();
+
+function lerpTable(t: Float64Array, s: number): number {
+  const f = Math.min(S_MAX, Math.max(S_MIN, s)) - S_MIN;
+  const i = Math.floor(f);
+  const a = f - i;
+  return t[i]! + (t[Math.min(t.length - 1, i + 1)]! - t[i]!) * a;
+}
+
+/** 거리 s(m), 진행 방향 오른쪽으로 d(m) → 월드 좌표 (y=0). d=0 이 왼쪽 난간 쪽 */
+export function trackPoint(s: number, d: number, out = new THREE.Vector3()): THREE.Vector3 {
+  const h = lerpTable(PH, s);
+  return out.set(lerpTable(PX, s) + Math.sin(h) * d, 0, lerpTable(PZ, s) + Math.cos(h) * d);
+}
+
+/** 진행 방향(라디안, 월드 Y축 회전: 0 = +X, 왼쪽으로 돌면 증가) */
+export function trackHeading(s: number): number {
+  return lerpTable(PH, s);
+}
+
+/** 곡률 (rad/m, + = 왼쪽으로 도는 중) — 말 기울기·카메라 구도용 */
+export function trackCurvature(s: number): number {
+  return (lerpTable(PH, s + 2) - lerpTable(PH, s - 2)) / 4;
+}
+
+const tmpP = new THREE.Vector3();
+
 const LANE_W = 1.75;
 const HS = 1.35; // 말·기수 크기 배율 (빔 뒷자리에서도 보이게 실제보다 큼)
 
@@ -49,6 +131,16 @@ export interface Frame3D {
   /** 선두가 결승선 가까이 → 결승선 고정 카메라 */
   finishLock: boolean;
   paused: boolean;
+  /** 작전 선택 창이 열려 있음 → 전체 판세가 보이는 구도 우선 */
+  tacticOpen?: boolean;
+}
+
+/** 지금 화면의 촬영 구도 (HUD 표시용) */
+export type ShotType = 'start' | 'wide' | 'follow' | 'battle' | 'corner' | 'finish';
+export interface ShotInfo {
+  type: ShotType;
+  /** follow: 따라가는 말 · battle: 다투는 말들 (레인) */
+  lanes: number[];
 }
 
 export interface Anchor {
@@ -62,6 +154,9 @@ export interface Anchor {
 interface Leg {
   hip: THREE.Group;
   knee: THREE.Group;
+  /** 직전 프레임 걸음 위치 (발굽이 땅에 닿는 순간 감지) */
+  prevU?: number;
+  hoof: THREE.Object3D;
   /** 걸음 안에서의 시작 위치 (0..1) */
   off: number;
   front: boolean;
@@ -79,7 +174,7 @@ interface Rig {
   armL: THREE.Group;
   armR: THREE.Group;
   shadow: THREE.Mesh;
-  coatMat: THREE.MeshLambertMaterial;
+  coatMat: THREE.MeshStandardMaterial;
   chase: THREE.Mesh;
   streaks: THREE.Group;
   lane: number;
@@ -96,27 +191,6 @@ interface Rig {
   dust: THREE.Sprite[];
   /** 몸개그 자세 (부드럽게 따라감) */
   pose: { lean: number; lift: number; arms: number; yaw: number; side: number; slump: number };
-}
-
-// ───────────────────────── 트랙 좌표 ─────────────────────────
-
-const tmpP = new THREE.Vector3();
-/** 거리 s(m), 안쪽 난간에서 바깥으로 d(m) → 월드 좌표 (y=0) */
-export function trackPoint(s: number, d: number, out = new THREE.Vector3()): THREE.Vector3 {
-  if (s <= S1) return out.set(s, 0, d);
-  if (s <= S2) {
-    const a = (s - S1) / R;
-    const r = R + d;
-    return out.set(S1 + r * Math.sin(a), 0, -R + r * Math.cos(a));
-  }
-  return out.set(S1 - (s - S2), 0, -2 * R - d);
-}
-
-/** 진행 방향(라디안, 월드 Y축 회전: 0 = +X) */
-export function trackHeading(s: number): number {
-  if (s <= S1) return 0;
-  if (s <= S2) return (s - S1) / R; // 왼쪽(+Y 회전)으로 돔
-  return Math.PI;
 }
 
 function smooth(t: number): number {
@@ -150,13 +224,66 @@ export class Race3D {
   private gateDoors: THREE.Mesh[] = [];
   private camPos = new THREE.Vector3(60, 30, 80);
   private camLook = new THREE.Vector3(0, 0, 0);
-  private focus = { lane: -1, until: 0, w: 0 };
   /** 코너 진입 때 2~3초 낮게 따라가는 장면 (가까운 말은 크게, 먼 말은 작게) */
   private corner = { done: false, until: 0, w: 0 };
+  /**
+   * 중계 감독: 전체 구도를 기본으로 개별 추적·선두권 접전 장면을 섞는다.
+   * 한 장면 3~6초(경주 시간에 비례), 최소 유지 시간이 지나야 바뀌고, 개별 장면 뒤에는 전체 구도로 돌아옴.
+   */
+  private shot: { type: ShotType; lanes: number[]; since: number; until: number } = { type: 'start', lanes: [], since: 0, until: 0 };
+  private shotQueue: { lane: number; at: number } | null = null;
+  private shownAt = new Map<number, number>();
+  private raceSec = 70;
+  private fovNow = 34;
+
+  /** 개그 리액션 (기수 짧은 몸짓) — 레인 → 종류·끝나는 시각. 순수 연출 */
+  private reactions = new Map<number, { kind: 'cheer' | 'shock' | 'nod'; until: number; from: number }>();
+  react(lane: number, kind: 'cheer' | 'shock' | 'nod', ms = 1200): void {
+    if (lane < 0 || lane >= this.rigs.length) return;
+    this.reactions.set(lane, { kind, until: this.now + ms, from: this.now });
+  }
+
+  /** 지금 촬영 구도 */
+  get shotInfo(): ShotInfo {
+    return { type: this.shot.type, lanes: this.shot.lanes };
+  }
   private now = 0;
   private trackW = 30;
   private n = 0;
   private numberTex = new Map<number, THREE.CanvasTexture>();
+  /**
+   * group 의 바로 아래 자식 중 material 이 같은 메시들을 하나로 합침 (위치·회전·크기 반영).
+   * 합친 모양은 key 로 캐시해 모든 말이 공유 → 말 20마리여도 그리기 횟수가 크게 줄어듦
+   */
+  private mergeStatic(group: THREE.Object3D, mat: THREE.Material, key: string): void {
+    const parts = group.children.filter((c): c is THREE.Mesh => c instanceof THREE.Mesh && c.material === mat);
+    if (parts.length < 2) return;
+    let g = this.geoCache.get('merged:' + key);
+    if (!g) {
+      const geos = parts.map((m) => {
+        m.updateMatrix();
+        const c = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+        c.deleteAttribute('uv');
+        return c.applyMatrix4(m.matrix);
+      });
+      g = mergeGeometries(geos) ?? undefined;
+      if (!g) return; // 합치기 실패 시 그대로 둠 (그려지는 모양은 같음)
+      this.geoCache.set('merged:' + key, g);
+    }
+    for (const m of parts) group.remove(m);
+    group.add(new THREE.Mesh(g, mat));
+  }
+
+  /** 말들이 같은 모양을 공유 (메모리·로딩 절약) */
+  private geoCache = new Map<string, THREE.BufferGeometry>();
+  private geo(key: string, make: () => THREE.BufferGeometry): THREE.BufferGeometry {
+    let g = this.geoCache.get(key);
+    if (!g) {
+      g = make();
+      this.geoCache.set(key, g);
+    }
+    return g;
+  }
   private v = new THREE.Vector3();
   /** setRace 이후 실제로 그린 프레임 수 (0 이면 아직 이 경주의 첫 화면을 못 그림) */
   private framesSinceSet = 0;
@@ -175,10 +302,12 @@ export class Race3D {
     this.scene.background = sky;
     this.scene.fog = new THREE.Fog(sky, 260, 900);
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x4a7a3a, 1.6));
-    const sun = new THREE.DirectionalLight(0xfff2d8, 1.9);
-    sun.position.set(-120, 220, 160);
+    // 늦은 오후 햇빛: 따뜻한 정면광 + 은은한 하늘빛
+    const sun = new THREE.DirectionalLight(0xffe6c0, 2.1);
+    sun.position.set(-160, 180, 220);
     this.scene.add(sun);
     this.buildWorld(30);
+    if (this.quality === 'low') this.applyQuality();
   }
 
   dispose(): void {
@@ -206,7 +335,6 @@ export class Race3D {
       this.scene.add(rig.root);
     });
     this.buildGate();
-    this.focus = { lane: -1, until: 0, w: 0 };
     this.framesSinceSet = 0;
     // 출발선 고정 구도로 카메라를 바로 옮기고(이전 경주의 결승선 구도에서 날아오지 않게), 셰이더를 미리 준비
     this.startView(this.camPos, this.camLook);
@@ -218,13 +346,18 @@ export class Race3D {
       /* 첫 렌더에서 다시 시도됨 */
     }
     this.corner = { done: false, until: 0, w: 0 };
+    this.shot = { type: 'start', lanes: [], since: 0, until: 0 };
+    this.shotQueue = null;
+    this.shownAt.clear();
+    this.raceSec = raceSeconds;
+    this.reactions.clear();
   }
 
   /** 추월·각성 순간 해당 말을 짧게 가까이 */
-  focusOn(lane: number, ms: number): void {
+  focusOn(lane: number, _ms?: number): void {
     if (lane < 0 || lane >= this.rigs.length) return;
-    this.focus.lane = lane;
-    this.focus.until = this.now + ms;
+    // 감독에게 요청: 지금 장면의 최소 유지 시간이 지나면 이 말을 잠깐 비춤 (연속 요청은 마지막 것만)
+    this.shotQueue = { lane, at: this.now };
   }
 
   // ───────── 월드 ─────────
@@ -243,26 +376,29 @@ export class Race3D {
     ground.position.set(100, -0.05, -100);
     this.world.add(ground);
 
-    // 안쪽 잔디 (더 진하게, 줄무늬)
-    const inner: THREE.Vector2[] = [];
-    for (let s = 0; s <= 1060; s += 4) {
-      const p = trackPoint(s, -1.5, tmpP);
-      inner.push(new THREE.Vector2(p.x, -p.z));
-    }
-    const infield = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(inner)), new THREE.MeshLambertMaterial({ color: 0x2f7a33 }));
-    infield.rotation.x = -Math.PI / 2;
-    infield.position.y = -0.02;
-    this.world.add(infield);
-    for (let k = 0; k < 7; k++) {
-      const stripe = new THREE.Mesh(new THREE.PlaneGeometry(250, 12), new THREE.MeshLambertMaterial({ color: 0x35853a }));
-      stripe.rotation.x = -Math.PI / 2;
-      stripe.position.set(150, -0.01, -30 - k * 26);
-      this.world.add(stripe);
+    // 경주로 양옆 잔디 띠 (조금 진하게) — 코스 모양을 따라감
+    for (const [d0, d1] of [[-12, -1.5], [W + 1.5, W + 12]] as const) {
+      const vp: number[] = [];
+      const vi: number[] = [];
+      let k = 0;
+      for (let s = -100; s <= 1110; s += 4) {
+        const a = trackPoint(s, d0, new THREE.Vector3());
+        const b = trackPoint(s, d1, new THREE.Vector3());
+        vp.push(a.x, -0.01, a.z, b.x, -0.01, b.z);
+        if (k > 0) vi.push(k - 2, k - 1, k, k - 1, k + 1, k);
+        k += 2;
+      }
+      const vg = new THREE.BufferGeometry();
+      vg.setAttribute('position', new THREE.Float32BufferAttribute(vp, 3));
+      vg.setIndex(vi);
+      vg.computeVertexNormals();
+      this.world.add(new THREE.Mesh(vg, new THREE.MeshLambertMaterial({ color: 0x347f35, side: THREE.DoubleSide })));
     }
 
     // 흙 트랙 (10m 마다 색이 살짝 다른 띠 → 속도감)
     const pos: number[] = [];
     const col: number[] = [];
+    const uv: number[] = [];
     const idx: number[] = [];
     const cA = new THREE.Color(0xc98d52);
     const cB = new THREE.Color(0xb97d45);
@@ -273,15 +409,17 @@ export class Race3D {
       const c = Math.floor(s / 10) % 2 === 0 ? cA : cB;
       pos.push(a.x, 0, a.z, b.x, 0, b.z);
       col.push(c.r, c.g, c.b, c.r, c.g, c.b);
+      uv.push(s / 5, 0, s / 5, (W + 3) / 5);
       if (vi > 0) idx.push(vi - 2, vi - 1, vi, vi - 1, vi + 1, vi);
       vi += 2;
     }
     const tg = new THREE.BufferGeometry();
     tg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     tg.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    tg.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
     tg.setIndex(idx);
     tg.computeVertexNormals();
-    const trackMesh = new THREE.Mesh(tg, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+    const trackMesh = new THREE.Mesh(tg, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, map: this.dirtTexture() }));
     this.world.add(trackMesh);
 
     // 흰 난간 (안쪽·바깥쪽): 기둥 + 위 레일
@@ -351,20 +489,32 @@ export class Race3D {
 
     // 관중석: 결승 직선 바깥 (큰 것) · 출발 직선 바깥 (작은 것) → 카메라가 움직일 때 깊이감
     // 카메라는 트랙 바깥에서 비스듬히 보므로, 관중석은 트랙 건너편(안쪽)에 두어 말 뒤 배경으로 보이게
-    this.addStand(640, 1090, -12, 7);
-    this.addStand(-30, 250, -12, 5);
+    this.addStand(700, 1090, -12, 7);
+    this.addStand(-30, 95, -12, 5);
     // 안쪽 나무 몇 그루 (멀리 있는 기준점)
     const trunk = new THREE.MeshLambertMaterial({ color: 0x6b4423 });
     const leaf = new THREE.MeshLambertMaterial({ color: 0x2c6e2f, flatShading: true });
-    for (let k = 0; k < 14; k++) {
-      const s = 60 + k * 70;
-      const p = trackPoint(s, -36 - (k % 3) * 16, new THREE.Vector3());
+    for (let k = 0; k < 40; k++) {
+      const s = 30 + k * 26;
+      const side = k % 2 ? -1 : 1;
+      const p = trackPoint(s, side < 0 ? -30 - (k % 3) * 12 : W + 30 + (k % 3) * 12, new THREE.Vector3());
+      if (!this.clearOfTrack(p, W, 14) || (s > 680 && side < 0)) continue; // 코스 위·관중석 자리는 피함
       const t = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.7, 4, 6), trunk);
       t.position.set(p.x, 2, p.z);
       const c = new THREE.Mesh(new THREE.ConeGeometry(3.4, 8, 7), leaf);
       c.position.set(p.x, 7.5, p.z);
       this.world.add(t, c);
     }
+  }
+
+  /** 이 지점이 경주로(난간 포함)에서 margin 이상 떨어졌는가 */
+  private clearOfTrack(p: THREE.Vector3, W: number, margin: number): boolean {
+    const c = new THREE.Vector3();
+    for (let s = -100; s <= 1110; s += 6) {
+      trackPoint(s, W / 2, c);
+      if (Math.hypot(c.x - p.x, c.z - p.z) < W / 2 + 2 + margin) return false;
+    }
+    return true;
   }
 
   /** 트랙 바깥쪽 관중석 (계단 + 지붕 + 관중) */
@@ -451,80 +601,121 @@ export class Race3D {
 
   // ───────── 말 + 기수 (로우폴리) ─────────
   private buildHorse(id: number, lane: number): Rig {
-    const coat = new THREE.MeshLambertMaterial({ color: coatColor(id), flatShading: true });
-    const dark = new THREE.MeshLambertMaterial({ color: 0x2a1a10, flatShading: true });
-    const silk = new THREE.MeshLambertMaterial({ color: horseColor(id), flatShading: true });
-    const white = new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true });
-    const skin = new THREE.MeshLambertMaterial({ color: 0xf1c7a0, flatShading: true });
+    // 재질: 털은 은은한 광택(반사), 갈기·꼬리·발굽은 무광 — 조명이 둥근 몸에 흐르며 근육 덩어리가 읽힘
+    const coat = new THREE.MeshStandardMaterial({ color: coatColor(id), roughness: 0.5, metalness: 0.05 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x24160d, roughness: 0.9 });
+    const hoofMat = new THREE.MeshStandardMaterial({ color: 0x1a1410, roughness: 0.7 });
+    const silk = new THREE.MeshStandardMaterial({ color: horseColor(id), roughness: 0.45, metalness: 0.05 });
+    const white = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
+    const skin = new THREE.MeshStandardMaterial({ color: 0xf1c7a0, roughness: 0.7 });
     const box = (w: number, h: number, d: number, m: THREE.Material) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+    const ell = (rx: number, ry: number, rz: number, m: THREE.Material) => {
+      const me = new THREE.Mesh(this.geo('sphere', () => new THREE.SphereGeometry(1, 18, 12)), m);
+      me.scale.set(rx, ry, rz);
+      return me;
+    };
+    /** 축(Y)을 따라 위·아래 반지름이 다른 원기둥 (다리·목·머리) */
+    const taper = (rTop: number, rBot: number, h: number, m: THREE.Material, seg = 12) =>
+      new THREE.Mesh(this.geo(`t${rTop}-${rBot}-${h}-${seg}`, () => new THREE.CylinderGeometry(rTop, rBot, h, seg)), m);
 
     const root = new THREE.Group();
+    root.rotation.order = 'YXZ'; // 진행 방향(Y) 먼저, 그다음 커브 기울기(X)
     const horse = new THREE.Group();
     root.add(horse);
 
-    // 몸통 (앞쪽이 약간 높고 굵게)
-    const body = box(2.1, 0.95, 0.8, coat);
-    body.position.set(0, 1.6, 0);
-    const chest = box(0.7, 1.0, 0.82, coat);
-    chest.position.set(0.95, 1.65, 0);
-    const rump = box(0.7, 0.95, 0.84, coat);
-    rump.position.set(-0.9, 1.68, 0);
-    horse.add(body, chest, rump);
+    // 몸통: 가슴(앞)은 깊고 둥글게, 허리는 조금 가늘게, 엉덩이는 둥근 근육 → 실제 말 옆모습 비율
+    const body = new THREE.Mesh(this.geo('body', () => new THREE.CapsuleGeometry(0.42, 1.35, 8, 18)), coat);
+    body.rotation.z = Math.PI / 2;
+    body.scale.set(1, 1, 0.9);
+    body.position.set(0, 1.62, 0);
+    const chest = ell(0.55, 0.55, 0.44, coat);
+    chest.position.set(0.78, 1.6, 0);
+    const shoulder = ell(0.42, 0.5, 0.42, coat);
+    shoulder.position.set(0.62, 1.78, 0);
+    const rump = ell(0.56, 0.52, 0.46, coat);
+    rump.position.set(-0.8, 1.7, 0);
+    const belly = ell(0.8, 0.32, 0.38, coat);
+    belly.position.set(0, 1.36, 0);
+    horse.add(body, chest, shoulder, rump, belly);
+    this.mergeStatic(horse, coat, 'body');
+    // 고삐: 기수 손 → 말 입 (양쪽)
+    const reinMat = new THREE.MeshStandardMaterial({ color: 0x3a2414, roughness: 0.8 });
+    for (const side of [1, -1]) {
+      const a = new THREE.Vector3(0.5, 2.28, 0.14 * side);
+      const b = new THREE.Vector3(1.7, 2.55, 0.12 * side);
+      const rein = new THREE.Mesh(this.geo('rein', () => new THREE.CylinderGeometry(0.018, 0.018, 1, 4)), reinMat);
+      rein.position.copy(a).add(b).multiplyScalar(0.5);
+      rein.scale.y = a.distanceTo(b);
+      rein.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
+      horse.add(rein);
+    }
 
-    // 목·머리 (목 관절 그룹)
+    // 목·머리 (목 관절 그룹): 목은 가슴 쪽이 굵고 머리 쪽이 가늘게, 머리는 이마가 넓고 주둥이로 갈수록 좁게
     const neck = new THREE.Group();
     neck.position.set(1.15, 1.95, 0);
-    const nk = box(0.45, 1.15, 0.46, coat);
+    const nk = taper(0.2, 0.33, 1.2, coat);
     nk.position.set(0.15, 0.45, 0);
     nk.rotation.z = -0.55;
-    const mane = box(0.14, 1.1, 0.2, dark);
-    mane.position.set(-0.08, 0.55, 0);
-    mane.rotation.z = -0.55;
-    const head = box(0.85, 0.4, 0.42, coat);
-    head.position.set(0.72, 0.95, 0);
-    head.rotation.z = -0.45;
-    const nose = box(0.3, 0.32, 0.38, dark);
-    nose.position.set(1.08, 0.77, 0);
-    nose.rotation.z = -0.45;
-    const earL = box(0.1, 0.25, 0.08, coat);
-    earL.position.set(0.45, 1.25, 0.12);
+    const crest = ell(0.12, 0.6, 0.12, dark); // 갈기
+    crest.name = 'mane';
+    crest.position.set(-0.06, 0.58, 0);
+    crest.rotation.z = -0.55;
+    const head = taper(0.12, 0.2, 0.82, coat);
+    head.position.set(0.72, 0.93, 0);
+    head.rotation.z = -(Math.PI / 2 + 0.45);
+    const jaw = ell(0.2, 0.17, 0.17, coat);
+    jaw.position.set(0.45, 1.02, 0);
+    const nose = ell(0.13, 0.12, 0.14, dark);
+    nose.position.set(1.08, 0.75, 0);
+    const earGeo = this.geo('ear', () => new THREE.ConeGeometry(0.07, 0.26, 6));
+    const earL = new THREE.Mesh(earGeo, coat);
+    earL.position.set(0.42, 1.27, 0.1);
+    earL.rotation.z = 0.2;
     const earR = earL.clone();
-    earR.position.z = -0.12;
-    const blaze = box(0.5, 0.06, 0.12, white);
-    blaze.position.set(0.8, 1.13, 0);
+    earR.position.z = -0.1;
+    const blaze = box(0.46, 0.04, 0.1, white);
+    blaze.position.set(0.8, 1.11, 0);
     blaze.rotation.z = -0.45;
-    neck.add(nk, mane, head, nose, earL, earR, blaze);
+    neck.add(nk, crest, head, jaw, nose, earL, earR, blaze);
+    this.mergeStatic(neck, coat, 'neck');
     horse.add(neck);
 
-    const tail = box(0.18, 1.0, 0.2, dark);
-    tail.geometry.translate(0, -0.5, 0);
-    tail.position.set(-1.25, 1.95, 0);
+    const tail = new THREE.Mesh(this.geo('tail', () => new THREE.ConeGeometry(0.16, 1.05, 8).translate(0, -0.52, 0)), dark);
+    tail.position.set(-1.28, 1.92, 0);
     tail.rotation.z = -0.6;
     horse.add(tail);
 
-    // 다리 4개 (엉덩이·무릎 관절)
+    // 다리 4개 (엉덩이·무릎 관절 — 길이는 걸음 IK 와 같게): 허벅지는 굵게, 정강이는 가늘게, 구절(관절)과 발굽
     const legs: Leg[] = [];
     const legDef: [number, number, number, boolean][] = [
-      [0.85, 0.27, 0.5, true],
-      [0.85, -0.27, 0.6, true],
-      [-0.85, 0.27, 0.0, false],
-      [-0.85, -0.27, 0.1, false],
+      [0.85, 0.24, 0.5, true],
+      [0.85, -0.24, 0.6, true],
+      [-0.85, 0.25, 0.0, false],
+      [-0.85, -0.25, 0.1, false],
     ];
     for (const [x, z, off, front] of legDef) {
       const hip = new THREE.Group();
       hip.position.set(x, 1.3, z);
-      const upper = box(0.24, 0.72, 0.24, coat);
+      const upper = taper(front ? 0.15 : 0.19, 0.09, 0.74, coat);
       upper.position.y = -0.36;
+      const thigh = ell(front ? 0.2 : 0.27, 0.3, 0.16, coat); // 어깨·엉덩이 근육 덩어리
+      thigh.position.y = -0.08;
       const knee = new THREE.Group();
       knee.position.y = -0.72;
-      const lower = box(0.16, 0.62, 0.16, coat);
-      lower.position.y = -0.31;
-      const hoof = box(0.22, 0.14, 0.22, dark);
+      const kneeBall = ell(0.09, 0.09, 0.09, coat);
+      const lower = taper(0.075, 0.062, 0.56, coat, 8);
+      lower.position.y = -0.28;
+      const fetlock = ell(0.08, 0.07, 0.08, coat);
+      fetlock.position.y = -0.55;
+      const hoof = taper(0.085, 0.115, 0.14, hoofMat, 10);
       hoof.position.y = -0.62;
-      knee.add(lower, hoof);
-      hip.add(upper, knee);
+      knee.add(lower, hoof, kneeBall, fetlock);
+      hip.add(upper, thigh, knee);
       horse.add(hip);
-      legs.push({ hip, knee, off, front, hipX: x });
+      // 같은 재질 조각을 하나로 합쳐 그리기 횟수 절약 (말끼리 모양 공유)
+      this.mergeStatic(knee, coat, 'knee');
+      this.mergeStatic(hip, coat, front ? 'hipF' : 'hipH');
+      legs.push({ hip, knee, off, front, hipX: x, hoof });
     }
 
     // 안장 천 + 등번호 (양옆) — 뒷자리에서도 보이게 크게
@@ -576,6 +767,8 @@ export class Race3D {
     const armL = arm(1);
     const armR = arm(-1);
     jockey.add(thighL, thighR, torso);
+    this.mergeStatic(jockey, white, 'thighs');
+    this.mergeStatic(torso, silk, 'torso');
     horse.add(jockey);
 
     // 땅에 붙는 그림자
@@ -624,6 +817,67 @@ export class Race3D {
       lane, d: 1.2 + lane * LANE_W, gait: (lane * 0.37) % 1, run: 0, prevX: NaN, prevZ: 0, prevShow: NaN, ring, dust: this.makeDust(),
       pose: { lean: 0.55, lift: 0, arms: 0, yaw: 0, side: 0, slump: 0 },
     };
+  }
+
+  /** 흙 질감 (발굽 자국·알갱이) — 앱 안에서 그려 외부 파일 없음 */
+  private dirtTexture(): THREE.CanvasTexture {
+    const c = document.createElement('canvas');
+    c.width = c.height = 256;
+    const ctx = c.getContext('2d')!;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, 256, 256);
+    let seed = 12345;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let k = 0; k < 2600; k++) {
+      const v = 200 + Math.floor(rnd() * 55);
+      ctx.fillStyle = `rgb(${v},${v - 8},${v - 18})`;
+      ctx.fillRect(rnd() * 256, rnd() * 256, 1 + rnd() * 3, 1 + rnd() * 2);
+    }
+    // 진행 방향으로 난 발굽 자국 줄
+    for (let k = 0; k < 40; k++) {
+      ctx.fillStyle = 'rgba(150,120,90,0.18)';
+      ctx.fillRect(rnd() * 256, rnd() * 256, 10 + rnd() * 20, 2 + rnd() * 3);
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 4;
+    return t;
+  }
+
+  /** 발굽이 땅에 닿는 순간 작은 흙먼지 (카메라 가까운 말만, 공용 풀 → 가벼움) */
+  private hoofDust: { sp: THREE.Sprite; age: number; life: number }[] = [];
+  private hoofDustNext = 0;
+  private puff(at: THREE.Vector3): void {
+    if (!this.hoofDust.length) {
+      if (!this.dustTex) this.makeDust().forEach((d) => this.scene.remove(d));
+      for (let k = 0; k < 70; k++) {
+        const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.dustTex!, transparent: true, depthWrite: false, opacity: 0 }));
+        sp.visible = false;
+        this.scene.add(sp);
+        this.hoofDust.push({ sp, age: 0, life: 0 });
+      }
+    }
+    const d = this.hoofDust[this.hoofDustNext++ % this.hoofDust.length]!;
+    d.sp.position.copy(at).setY(0.25);
+    d.age = 0;
+    d.life = 420;
+    d.sp.visible = true;
+  }
+  private updateHoofDust(dt: number): void {
+    for (const d of this.hoofDust) {
+      if (!d.sp.visible) continue;
+      d.age += dt;
+      const k = d.age / d.life;
+      if (k >= 1) {
+        d.sp.visible = false;
+        continue;
+      }
+      const sc = 0.5 + k * 1.3;
+      d.sp.scale.set(sc, sc * 0.7, 1);
+      d.sp.position.y = 0.25 + k * 0.5;
+      (d.sp.material as THREE.SpriteMaterial).opacity = 0.55 * (1 - k);
+    }
   }
 
   private dustTex: THREE.CanvasTexture | null = null;
@@ -688,8 +942,31 @@ export class Race3D {
   }
 
   // ───────── 매 프레임 ─────────
+  /**
+   * 그래픽 품질: 'high'(기본) · 'low' (?q=low 또는 프레임이 계속 느리면 자동 전환)
+   * low: 렌더 해상도 67% · 발굽 흙먼지 끔 → 행사 노트북 내장 그래픽에서도 부드럽게
+   */
+  private quality: 'high' | 'low' = /[?&]q=low(&|$)/.test(typeof location !== 'undefined' ? location.search : '') ? 'low' : 'high';
+  private slowMs = 0;
+  private applyQuality(): void {
+    this.renderer.setPixelRatio(this.quality === 'low' ? 0.67 : 1);
+    this.renderer.setSize(VIEW_W, VIEW_H, false);
+  }
+  get qualityLevel(): 'high' | 'low' {
+    return this.quality;
+  }
+
   render(f: Frame3D): Anchor[] {
     this.now += f.dt;
+    // 프레임 간격이 3초 넘게 계속 34ms(약 30fps) 이상이면 자동으로 가벼운 품질로
+    if (this.quality === 'high' && !f.paused) {
+      this.slowMs = f.dt > 34 && f.dt < 500 ? this.slowMs + f.dt : Math.max(0, this.slowMs - f.dt * 2);
+      if (this.slowMs > 3000) {
+        this.quality = 'low';
+        this.applyQuality();
+        console.info('[3d] 프레임이 느려 그래픽 품질을 낮춤');
+      }
+    }
     const n = this.rigs.length;
     const dt = Math.min(f.dt, 100);
 
@@ -795,6 +1072,25 @@ export class Race3D {
           snap = 70;
         }
       }
+      // 개그 리액션: 이벤트·작전 자세보다 짧게 우선 (만세 · 화들짝 · 끄덕)
+      const rx = this.reactions.get(i);
+      if (rx && this.now < rx.until && !type) {
+        const k = (this.now - rx.from) / (rx.until - rx.from);
+        if (rx.kind === 'cheer') {
+          arms = 1.25 + Math.sin(this.now * 0.03) * 0.15;
+          lean = 0.2;
+          lift = 0.25;
+        } else if (rx.kind === 'shock') {
+          lean = k < 0.5 ? -0.8 : 0.3;
+          arms = 0.95;
+          lift = 0.1;
+        } else {
+          lean = 0.6 + Math.sin(k * Math.PI * 6) * 0.35;
+        }
+        snap = 80;
+      } else if (rx && this.now >= rx.until) {
+        this.reactions.delete(i);
+      }
       p.lean = approach(p.lean, lean, dt, snap);
       p.lift = approach(p.lift, lift, dt, snap);
       p.arms = approach(p.arms, arms, dt, 90);
@@ -809,6 +1105,11 @@ export class Race3D {
       rig.armR.rotation.z = p.arms * 2.4 + rig.run * 0.18 * Math.sin(TAU * g);
       rig.neck.rotation.z -= p.slump * 0.5;
       rig.root.rotation.y += p.yaw;
+      // 커브에서 말·기수가 안쪽으로 살짝 기울고, 직선에서 바로 섬 (곡률 × 달리는 정도, 최대 약 9°)
+      const curv = trackCurvature(s);
+      p.side = approach(p.side, Math.max(-0.16, Math.min(0.16, -curv * 9 * rig.run)), dt, 220);
+      rig.root.rotation.x = p.side;
+      rig.jockey.rotation.z = p.side * 0.6;
       rig.coatMat.emissive.setHex(type === 'AWAKEN' ? 0x661010 : 0x000000);
       // 발밑 고리: 이벤트 종류 색, 시작 순간 크게 → 작게
       if (type) {
@@ -866,6 +1167,7 @@ export class Race3D {
     }
 
     this.updateCamera(f, dt);
+    this.updateHoofDust(dt);
     this.renderer.render(this.scene, this.camera);
     this.framesSinceSet++;
 
@@ -942,6 +1244,9 @@ export class Race3D {
     rig.horse.position.y = bob;
     rig.horse.rotation.z = pitch;
     rig.neck.rotation.z = neck;
+    // 갈기: 걸음 박자보다 조금 늦게 흔들림
+    const mane = rig.neck.getObjectByName('mane');
+    if (mane) mane.rotation.z = -0.55 + run * 0.1 * Math.sin(TAU * (g - 0.35));
     rig.tail.rotation.z = -0.6 - run * 0.5 + Math.sin(TAU * (g - 0.3)) * 0.18 * run;
     rig.shadow.scale.set(1.7 - bob * 1.2, 0.75, 1);
 
@@ -961,6 +1266,12 @@ export class Race3D {
         fx = -A + 2 * A * (w - Math.sin(TAU * w) / TAU);
         fy = run * (leg.front ? 0.62 : 0.42) * Math.pow(Math.sin(Math.PI * w), 0.9);
       }
+      // 발굽이 땅에 닿는 순간(디딤 시작) 작은 흙먼지 — 카메라 60m 안의 달리는 말만
+      if (leg.prevU !== undefined && u < leg.prevU && run > 0.6 && this.quality === 'high' && this.camera.position.distanceTo(rig.root.position) < 60) {
+        leg.hoof.getWorldPosition(this.v);
+        this.puff(this.v);
+      }
+      leg.prevU = u;
       // 앞발 구르기: 들어 올려 앞으로 긁듯이 내림
       if (li === pawLeg && paw >= 0) {
         fx += 0.28 * Math.sin(Math.PI * paw);
@@ -1083,55 +1394,8 @@ export class Race3D {
       // 출발: 게이트에 고정됐던 가까운 구도에서 기존 주행 카메라로 부드럽게 넘어감
       speedK = 420;
     } else {
-      // 주행: 무리의 옆뒤 바깥에서 비스듬히 따라감 (코너에서는 트랙 방향으로 돌아감)
-      const focusS = (lead + tail) / 2 + 4;
-      const dist = Math.min(92, Math.max(40, spread * 0.75 + 26 + W * 0.35));
-      // 코너를 빠져나오면 앞쪽 결승 직선이 펼쳐지게 조금 더 앞을 봄
-      const exitK = smooth((lead - S2) / 30) * (1 - smooth((lead - S2 - 120) / 60));
-      trackPoint(focusS - dist * 0.22, W + dist * 0.82, this.wantPos).setY(dist * 0.4);
-      trackPoint(focusS + 8 + exitK * 40, W * 0.45, this.wantLook).setY(1.5);
-    }
-
-    // 코너 진입: 선두가 코너에 들어서면 2.8초간 무리의 옆뒤 바깥에서 낮게 따라감 (광각 → 원근이 확실히 보임)
-    const live = f.mode === 'live' && !f.finishLock && f.elapsed >= 2600;
-    if (!live || lead < S1) this.corner.done = lead >= S1 + 60;
-    if (live && !this.corner.done && lead >= S1 + 8) {
-      this.corner.done = true;
-      this.corner.until = this.now + 2800;
-    }
-    const cw = live && this.now < this.corner.until ? 1 : 0;
-    this.corner.w = approach(this.corner.w, cw, dt, cw ? 260 : 520);
-    if (this.corner.w > 0.01) {
-      // 무리 가운데(앞쪽 절반의 중간)를 기준으로, 바깥 난간 바로 밖 낮은 위치에서 진행 방향 앞쪽을 봄
-      const mid = (lead + s(order[Math.min(n - 1, Math.floor(n * 0.25))]!)) / 2;
-      const cp = trackPoint(mid - 18, W + 8, new THREE.Vector3()).setY(5);
-      const cl = trackPoint(mid + 16, W * 0.4, new THREE.Vector3()).setY(2.2);
-      this.wantPos.lerp(cp, this.corner.w);
-      this.wantLook.lerp(cl, this.corner.w);
-    }
-
-    // 추월·각성: 해당 말과 바로 앞뒤 말이 함께 보이게 짧게 당겨 잡음 → 다시 전체 구도로
-    const fw = this.focus.lane >= 0 && this.now < this.focus.until && live && this.corner.w < 0.5 ? 1 : 0;
-    this.focus.w = approach(this.focus.w, fw, dt, fw ? 220 : 380);
-    if (this.focus.w > 0.01 && this.focus.lane >= 0) {
-      const r = order.indexOf(this.focus.lane);
-      const group = [order[r - 1], this.focus.lane, order[r + 1]].filter((x): x is number => x !== undefined);
-      let lo = Infinity;
-      let hi = -Infinity;
-      let dl = 0;
-      for (const g of group) {
-        lo = Math.min(lo, s(g));
-        hi = Math.max(hi, s(g));
-        dl += this.rigs[g]!.d;
-      }
-      dl /= group.length;
-      const span = Math.min(30, hi - lo + 6);
-      const mid = (lo + hi) / 2;
-      // 바깥 난간 밖에서 당겨 잡음 → 다른 말 사이로 카메라가 파고들지 않음
-      const fp = trackPoint(mid - 5, W + 12 + span * 0.9, new THREE.Vector3()).setY(7 + span * 0.2);
-      const fl = trackPoint(mid + 1, dl, new THREE.Vector3()).setY(2.6);
-      this.wantPos.lerp(fp, this.focus.w);
-      this.wantLook.lerp(fl, this.focus.w);
+      // 주행: 중계 감독이 고른 구도
+      speedK = this.direct(f, order, lead, tail, spread);
     }
 
     // 새로고침·탭 복귀로 멀리 건너뛰면 날아가지 않고 바로 그 구도로
@@ -1142,13 +1406,140 @@ export class Race3D {
     this.camLook.lerp(this.wantLook, speedK <= 1 ? 1 : Math.min(1, k * 1.6));
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camLook);
-    // 가까이 잡을 때는 화각을 좁혀(망원) 해당 말을 크게
-    // 코너 낮은 장면은 광각(가까운 말 크게·먼 말 작게), 추월 장면은 살짝 망원
-    const fov = 34 + this.corner.w * 16 - this.focus.w * 6;
-    if (Math.abs(this.camera.fov - fov) > 0.05) {
-      this.camera.fov = fov;
+    // 화각도 부드럽게 (개별 추적은 망원, 코너 낮은 장면은 광각)
+    const wantFov = f.mode === 'live' && !f.finishLock && f.elapsed >= 2600 ? this.shotFov : 34;
+    this.fovNow = approach(this.fovNow, wantFov, dt, 450);
+    if (Math.abs(this.camera.fov - this.fovNow) > 0.02) {
+      this.camera.fov = this.fovNow;
       this.camera.updateProjectionMatrix();
     }
+  }
+  private shotFov = 34;
+
+  /**
+   * 중계 감독. wantPos/wantLook/shotFov 를 정하고 위치 따라가기 부드러움(ms)을 돌려준다.
+   *  - wide   : 높은 사선 전체 구도 (기본) — 여러 말의 위치와 선두와의 격차가 한눈에
+   *  - follow : 한 말을 옆뒤 바깥 사선에서 함께 달리며 (망원) — 번호·이름 표시는 RaceScene
+   *  - battle : 선두 2~3마리를 낮은 측면에서, 진행 방향 앞쪽에 여유를 두고
+   *  - corner : 코너 진입 때 한 번, 무리 옆뒤에서 낮게 (광각)
+   * 카메라는 항상 바깥 난간 밖·지면 위 → 말·지면·난간을 뚫지 않음. 바라보는 점은 말의 위치(오르내림 없는 기준점)라 덜컹거리지 않음.
+   * 순수 연출: 말의 위치·속도·결과와 무관.
+   */
+  private direct(f: Frame3D, order: number[], lead: number, tail: number, spread: number): number {
+    const W = this.trackW;
+    const n = this.rigs.length;
+    const s = (i: number) => f.prog[i]! * 1000;
+    const k = Math.min(1.3, Math.max(0.6, this.raceSec / 70)); // 경주 시간 비례
+    const minHold = 2500 * k;
+    const now = this.now;
+    const held = now - this.shot.since;
+    const set = (type: ShotType, lanes: number[], ms: number) => {
+      if (type !== this.shot.type || lanes.join() !== this.shot.lanes.join()) {
+        this.shot = { type, lanes, since: now, until: now + ms * k };
+        for (const l of lanes) this.shownAt.set(l, now);
+      }
+    };
+
+    // ── 장면 고르기 ──
+    const finalStage = lead >= 800;
+    // 지금 선두가 달리는 곳이 커브면 (곡률이 클수록) 대열과 곡선이 보이는 높은 구도, 직선이면 낮은 측면 추적
+    const curveNow = Math.min(1, Math.abs(trackCurvature(lead)) * 120);
+    const top3close = n >= 2 && lead - s(order[Math.min(2, n - 1)]!) <= 6;
+    if (this.shot.type === 'start') set('wide', [], 3500);
+    if (f.tacticOpen) {
+      // 작전 선택 시간: 판세가 보이는 전체 구도 우선
+      if (this.shot.type !== 'wide' && (held >= 1200 || this.shot.type === 'follow')) set('wide', [], 4000);
+      else if (this.shot.type === 'wide') this.shot.until = Math.max(this.shot.until, now + 800);
+    } else if (!this.corner.done && lead >= BIG_CURVE_FROM + 8 && lead < BIG_CURVE_FROM + 60 && held >= 1200) {
+      this.corner.done = true;
+      set('corner', [], 2800);
+    } else {
+      // 이벤트(추월·각성·작전 효과·선두권 합류) 요청: 최소 유지 시간이 지났고 요청이 오래되지 않았으면 그 말을 잠깐 추적
+      const q = this.shotQueue;
+      if (q && now - q.at > 2500) this.shotQueue = null;
+      if (this.shotQueue && held >= minHold && this.shot.type === 'wide') {
+        const lane = this.shotQueue.lane;
+        this.shotQueue = null;
+        set('follow', [lane], 3500);
+      } else if (now >= this.shot.until && held >= minHold) {
+        if (this.shot.type !== 'wide') {
+          // 개별·접전 장면 뒤에는 전체 구도로 돌아와 판세 확인
+          set('wide', [], (finalStage ? 3000 : 4500));
+        } else if (curveNow > 0.5 && !finalStage) {
+          // 커브 구간: 전체 구도를 조금 더 오래 (대열이 곡선을 따라 휘는 모습)
+          this.shot.until = now + 2000 * k;
+        } else if (finalStage || (top3close && lead > 500)) {
+          set('battle', order.slice(0, Math.min(3, n)), 4500);
+        } else {
+          // 촬영 기회 고르게: 최근에 안 비춘 말 중 (중위권·추격 중인 말도) — 선두권 가중치 조금 더
+          let best = -1;
+          let bestScore = -Infinity;
+          for (let r = 0; r < n; r++) {
+            const lane = order[r]!;
+            if (f.prog[lane]! >= 1) continue;
+            const since = now - (this.shownAt.get(lane) ?? -1e9);
+            const score = Math.min(since, 60000) / 1000 + (r < 3 ? 6 : r < Math.ceil(n / 2) ? 3 : 0) + ((lane * 7 + Math.floor(now / 1000)) % 5);
+            if (score > bestScore) {
+              bestScore = score;
+              best = lane;
+            }
+          }
+          if (best >= 0) set('follow', [best], 4000);
+        }
+      }
+    }
+
+    // ── 구도 계산 ──
+    const type = this.shot.type;
+    if (type === 'follow' && this.shot.lanes.length) {
+      const lane = this.shot.lanes[0]!;
+      const fs = s(lane);
+      const d = this.rigs[lane]!.d;
+      // 옆뒤 바깥 사선에서 나란히 (바깥 난간 밖 4m 이상, 높이 4.5m) → 망원으로 말 크게
+      // 바깥 레인 말에 가리지 않게 조금 높여 내려다봄
+      // 직선에서는 낮게(속도감), 커브에서는 조금 높게. 안쪽 레인 말을 볼 때는 바깥 말에 가리지 않게 더 높게
+      const hide = Math.max(0, W - d) * 0.06;
+      trackPoint(fs - 8, W + 5, this.wantPos).setY(4.2 + curveNow * 3 + hide);
+      trackPoint(fs + 3, d, this.wantLook).setY(2.3);
+      const dist = this.wantPos.distanceTo(this.wantLook);
+      this.shotFov = Math.min(38, Math.max(14, (2 * Math.atan(5.5 / dist) * 180) / Math.PI));
+      return 220;
+    }
+    if (type === 'battle' && this.shot.lanes.length) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      let dl = 0;
+      for (const l of this.shot.lanes) {
+        lo = Math.min(lo, s(l));
+        hi = Math.max(hi, s(l));
+        dl += this.rigs[l]!.d;
+      }
+      dl /= this.shot.lanes.length;
+      const span = Math.min(40, hi - lo + 8);
+      // 낮은 측면, 진행 방향 앞쪽 여유 (화면 중심을 무리보다 앞에)
+      const mid = (lo + hi) / 2 + span * 0.18;
+      const back = W + 6 + span * 0.55;
+      trackPoint(mid - 3, back, this.wantPos).setY(3.4 + span * 0.06);
+      trackPoint(mid + 3, dl, this.wantLook).setY(2.0);
+      const dist = this.wantPos.distanceTo(this.wantLook);
+      this.shotFov = Math.min(44, Math.max(18, (2 * Math.atan((span * 0.42 + 4) / dist) * 180) / Math.PI));
+      return 260;
+    }
+    if (type === 'corner') {
+      const mid = (lead + s(order[Math.min(n - 1, Math.floor(n * 0.25))]!)) / 2;
+      trackPoint(mid - 18, W + 8, this.wantPos).setY(5);
+      trackPoint(mid + 16, W * 0.4, this.wantLook).setY(2.2);
+      this.shotFov = 50;
+      return 260;
+    }
+    // wide: 높은 사선 전체 구도 (무리 전체가 보이게 거리·높이 조절). 코너를 빠져나오면 앞쪽 결승 직선이 펼쳐지게
+    const focusS = (lead + tail) / 2 + 4;
+    const dist = Math.min(105, Math.max(48, spread * 0.85 + 30 + W * 0.4));
+    const exitK = smooth((lead - FINAL_FROM) / 30) * (1 - smooth((lead - FINAL_FROM - 120) / 60));
+    trackPoint(focusS - dist * 0.22, W + dist * 0.8, this.wantPos).setY(dist * (0.5 + curveNow * 0.25));
+    trackPoint(focusS + 8 + exitK * 40, W * 0.45, this.wantLook).setY(1.5);
+    this.shotFov = 36;
+    return 420;
   }
 }
 

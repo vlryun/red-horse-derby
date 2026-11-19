@@ -8,9 +8,10 @@
  *    그 말이 이기는 선택과 지는 선택이 함께 있는 시드 수
  */
 import { demoEntrants } from '../src/data/demo';
-import { Rng, TACTIC_TYPES, simulateRaceVersion, type TacticOrder, type TacticType } from '../src/engine';
+import { Rng, TACTIC_TYPES, simulateRaceVersion, tacticWindowCount, type TacticOrder, type TacticType } from '../src/engine';
 
-const VERSION = Number(process.argv[2] ?? 6);
+const VERSION = Number(process.argv[2] ?? 8);
+const W = tacticWindowCount(VERSION);
 const SEEDS = 120;
 const seedOf = (k: number) => (Math.imul(k + 1, 2654435761) ^ 0x5eed) >>> 0;
 
@@ -21,8 +22,8 @@ function others(seed: number, n: number, skip: number): TacticOrder[] {
   for (let id = 1; id <= n; id++) {
     const style = rng.int(4);
     const picks: (TacticType | null)[] = [];
-    for (let w = 1; w <= 3; w++) {
-      if (style === 0) picks.push(w < 3 ? 'SAVE' : 'SPRINT');
+    for (let w = 1; w <= W; w++) {
+      if (style === 0) picks.push(w < W - 1 ? 'SAVE' : 'SPRINT');
       else if (style === 1) picks.push(w === 1 ? 'SPRINT' : 'CHASE');
       else if (style === 2) picks.push('CHASE');
       else picks.push(rng.chance(1, 3) ? null : TACTIC_TYPES[rng.int(3)]!);
@@ -33,12 +34,20 @@ function others(seed: number, n: number, skip: number): TacticOrder[] {
   return out;
 }
 
-const PLANS: Record<string, (TacticType | null)[]> = {
-  '작전 없음': [null, null, null],
-  '따라잡기 3회': ['CHASE', 'CHASE', 'CHASE'],
-  '초반 질주': ['SPRINT', 'CHASE', 'CHASE'],
-  '아껴서 막판 질주': ['SAVE', 'SAVE', 'SPRINT'],
-};
+const PLANS: Record<string, (TacticType | null)[]> =
+  W === 5
+    ? {
+        '작전 없음': [null, null, null, null, null],
+        '따라잡기 5회': ['CHASE', 'CHASE', 'CHASE', 'CHASE', 'CHASE'],
+        '초반 질주': ['SPRINT', 'CHASE', 'CHASE', 'CHASE', 'CHASE'],
+        '아껴서 막판 질주': ['SAVE', 'SAVE', 'CHASE', 'SPRINT', 'SPRINT'],
+      }
+    : {
+        '작전 없음': [null, null, null],
+        '따라잡기 3회': ['CHASE', 'CHASE', 'CHASE'],
+        '초반 질주': ['SPRINT', 'CHASE', 'CHASE'],
+        '아껴서 막판 질주': ['SAVE', 'SAVE', 'SPRINT'],
+      };
 const plan = (id: number, p: (TacticType | null)[]) =>
   p.flatMap((t, i) => (t ? [{ id, window: i + 1, tactic: t } as TacticOrder] : []));
 
@@ -76,7 +85,8 @@ for (const n of [10, 20]) {
       // 마지막 선택 하나: 앞 두 번은 "따라잡기·따라잡기" 로 고정, 3차만 바꿈
       const last: Record<string, { rank: number; gap: number }> = {};
       for (const t3 of [null, 'SAVE', 'CHASE', 'SPRINT'] as (TacticType | null)[]) {
-        const r = simulateRaceVersion(VERSION, { seed, entrants, raceSeconds: s, tactics: [...rest, ...plan(id, ['CHASE', 'CHASE', t3])] });
+        const lead = W === 5 ? (['CHASE', 'CHASE', 'CHASE', 'CHASE'] as TacticType[]) : (['CHASE', 'CHASE'] as TacticType[]);
+        const r = simulateRaceVersion(VERSION, { seed, entrants, raceSeconds: s, tactics: [...rest, ...plan(id, [...lead, t3])] });
         const me = r.standings.find((x) => x.id === id)!;
         last[String(t3)] = { rank: me.rank, gap: Math.abs((r.standings[1]!.finishMs ?? 0) - r.standings[0]!.finishMs!) };
       }
@@ -93,7 +103,7 @@ for (const n of [10, 20]) {
         `\n          | 우승률 ${names.map((nm) => `${nm} ${pctS(wins[nm]!)}`).join(' · ')}` +
         `\n          | 가장 좋았던 전략 ${names.map((nm) => `${nm} ${pctS(best[nm]!)}`).join(' · ')}` +
         `\n          | 작전으로 오른 순위(최선-없음) 평균 ${(gapChange.reduce((a, b) => a + b, 0) / SEEDS).toFixed(1)}계단` +
-        ` | 3차 선택 하나로 우승이 갈린 시드 ${flipSeeds}개 (그중 0.3초 안 박빙 ${closeFlip}개)`,
+        ` | 마지막 선택 하나로 우승이 갈린 시드 ${flipSeeds}개 (그중 0.3초 안 박빙 ${closeFlip}개)`,
     );
   }
 }

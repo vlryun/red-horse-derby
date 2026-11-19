@@ -8,6 +8,7 @@ import {
   TICK_MS,
   hasCloseAhead,
   rankingAtTick,
+  tacticWindowCount,
   tacticWindows,
   tickAt,
   type RaceResult,
@@ -115,6 +116,23 @@ export function TacticBox({ sync, myNo, token }: { sync: RaceSync; myNo: number;
 
   if (!snap || !result || !raceId || lane < 0) return null;
   const { phase } = snap;
+  const total = tacticWindowCount(result.engineVersion);
+  // 회차 진행 표시: 적용된 작전 아이콘 · 지금 회차 · 남은 회차
+  const curNo = phase.kind === 'open' || phase.kind === 'after' ? phase.no : phase.kind === 'wait' ? phase.next - 1 : total;
+  const steps = (
+    <div className="tac-steps" aria-label={`작전 ${curNo}/${total}`}>
+      {Array.from({ length: total }, (_, i) => {
+        const no = i + 1;
+        const rec = result.tactics?.find((x) => x.window === no && x.lane === lane && x.applied && x.tick <= tickAt(result, clock!.elapsedMs()));
+        const now = phase.kind === 'open' && phase.no === no;
+        return (
+          <span key={no} className={`tac-step ${now ? 'now' : ''} ${rec ? 'done' : ''}`}>
+            {rec ? TACTIC_SPECS[rec.tactic].emoji : now ? '●' : no}
+          </span>
+        );
+      })}
+    </div>
+  );
 
   const choose = async (no: number, tactic: TacticType) => {
     setError(null);
@@ -150,10 +168,11 @@ export function TacticBox({ sync, myNo, token }: { sync: RaceSync; myNo: number;
     return (
       <div className="tactic-box open">
         <div className="tac-head">
-          <span>🎯 {phase.no}차 작전 타임</span>
+          <span>🎯 작전 선택 {phase.no}/{total}</span>
           <span className="tac-secs">{phase.secs}초</span>
         </div>
         {staminaBar}
+        {steps}
         {result.engineVersion >= 5 && <div className="tac-hint">💪 남은 체력이 많을수록 마지막 200m에서 덜 지쳐요</div>}
         <div className="tac-buttons">
           {TACTIC_TYPES.map((t) => {
@@ -232,11 +251,12 @@ export function TacticBox({ sync, myNo, token }: { sync: RaceSync; myNo: number;
         </>
       );
     } else {
-      text = <>{phase.no}차 작전 없음 · 기본 페이스</>;
+      text = <>작전 {phase.no}/{total} 고르지 않음 · 기본 페이스</>;
     }
     return (
       <div className={`tactic-box ${cls}`}>
         {staminaBar}
+        {steps}
         <div className="tac-status">{text}</div>
       </div>
     );
@@ -245,8 +265,9 @@ export function TacticBox({ sync, myNo, token }: { sync: RaceSync; myNo: number;
   return (
     <div className="tactic-box">
       {staminaBar}
+      {steps}
       <div className="tac-status muted">
-        {phase.kind === 'wait' ? `${phase.next}차 작전 타임까지 ${phase.secs}초` : '작전 타임 끝 · 끝까지 달려요!'}
+        {phase.kind === 'wait' ? `작전 선택 ${phase.next}/${total} 까지 ${phase.secs}초` : '작전 타임 끝 · 끝까지 달려요!'}
       </div>
     </div>
   );

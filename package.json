@@ -13,6 +13,7 @@
     "sim": "tsx scripts/simstats.ts",
     "balance": "tsx scripts/balance.ts",
     "tactics-impact": "tsx scripts/tactics-impact.ts",
+    "runaway": "tsx scripts/runaway.ts",
     "loadtest": "tsx scripts/loadtest-join.ts",
     "check-server": "tsx scripts/check-server.ts",
     "deploy": "node scripts/deploy.mjs",

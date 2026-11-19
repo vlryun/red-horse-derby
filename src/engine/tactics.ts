@@ -1,4 +1,4 @@
-import { TICK_MS } from './config';
+import { ENGINE_VERSION, TICK_MS } from './config';
 
 /**
  * 참가자 작전 (엔진 v4).
@@ -66,16 +66,27 @@ export const STAMINA_MAX = 100;
 /** "가까운 앞말": 바로 앞 25m 이내에 달리는 말이 있어야 따라잡기 가능 */
 export const CHASE_GAP = 25_000;
 
-export const TACTIC_WINDOW_COUNT = 3;
-/** 창이 닫히는 시각 (경주 시간의 천분율): 초반 직선 · 코너 진입 · 마지막 직선 직전 */
-const CLOSE_PERMILLE = [170, 360, 600] as const;
+/** 작전 창 최대 개수 (입력 검증용). 실제 개수는 엔진 버전에 따라 tacticWindowCount() */
+export const TACTIC_WINDOW_COUNT = 5;
+/**
+ * 창이 닫히는 시각 (경주 시간의 천분율)
+ *  v4~v7: 3번 (초반 직선 · 코너 진입 · 마지막 직선 직전)
+ *  v8   : 5번, 경기 시간에 고르게 — 마지막 효과도 1등 도착 전에 끝남 (30초 경기도 약 4초 여유)
+ * ⚠️ SQL(_tactic_close_ms_v) 과 같은 값이어야 함
+ */
+const CLOSE_PERMILLE_V4 = [170, 360, 600] as const;
+const CLOSE_PERMILLE_V8 = [150, 290, 430, 570, 710] as const;
+
+export function tacticWindowCount(version: number): number {
+  return version >= 8 ? 5 : 3;
+}
 /** 마감 → 적용까지 (서버에서 선택을 받아 모든 화면에 퍼지는 시간) */
 export const APPLY_DELAY_TICKS = 20;
 /** 서버가 마감 후 이만큼 지나야 그 창의 선택을 공개 (마지막 요청이 확실히 저장된 뒤) */
 export const REVEAL_GRACE_MS = 300;
 
 export interface TacticWindow {
-  /** 1..3 */
+  /** 1..3 (v4~v7) · 1..5 (v8) */
   no: number;
   openMs: number;
   closeMs: number;
@@ -85,12 +96,17 @@ export interface TacticWindow {
   endTick: number;
 }
 
-/** 경주 시간(초) → 세 번의 작전 창. 짧은 경기에서도 겹치지 않고 결승 전에 끝난다 (endTick = 가장 긴 작전 효과 끝) */
-export function tacticWindows(raceSeconds: number, version = 6): TacticWindow[] {
+/**
+ * 경주 시간(초) → 작전 창들. 짧은 경기에서도 겹치지 않고(다음 창은 앞 창의 작전이 적용된 뒤 열림) 결승 전에 끝난다.
+ * endTick = 가장 긴 작전 효과가 끝나는 틱
+ */
+export function tacticWindows(raceSeconds: number, version: number = ENGINE_VERSION): TacticWindow[] {
   const s = raceSeconds;
-  const len = Math.min(6000, Math.max(3500, s * 130));
+  const v8 = version >= 8;
+  // v8: 창이 5개라 길이를 조금 줄임 (30초 경기 3초 · 60초 이상 6초)
+  const len = v8 ? Math.min(6000, Math.max(3000, s * 100)) : Math.min(6000, Math.max(3500, s * 130));
   const dur = Math.max(...TACTIC_TYPES.map((t) => tacticTicks(version, t, s)));
-  return CLOSE_PERMILLE.map((pm, i) => {
+  return (v8 ? CLOSE_PERMILLE_V8 : CLOSE_PERMILLE_V4).map((pm, i) => {
     const closeMs = s * pm;
     const applyTick = Math.floor(closeMs / TICK_MS) + APPLY_DELAY_TICKS;
     return { no: i + 1, openMs: closeMs - len, closeMs, applyTick, endTick: applyTick + dur };

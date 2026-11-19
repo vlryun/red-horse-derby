@@ -7,9 +7,10 @@
  * 참가자 작전은 몇 가지 성향을 섞어 흉내 냄 (같은 시드·같은 작전이면 결과가 같음)
  */
 import { demoEntrants } from '../src/data/demo';
-import { Rng, TACTIC_TYPES, TICK_MS, TRACK_LENGTH, simulateRaceVersion, tacticWindows, type TacticOrder } from '../src/engine';
+import { Rng, TACTIC_TYPES, TICK_MS, TRACK_LENGTH, simulateRaceVersion, tacticWindowCount, tacticWindows, type TacticOrder } from '../src/engine';
 
-const VERSION = Number(process.argv[2] ?? 4);
+const VERSION = Number(process.argv[2] ?? 8);
+const WN = tacticWindowCount(VERSION);
 const ONLY_MIXED = process.argv[3] === 'mixed';
 const SEEDS = 150;
 const seedOf = (k: number) => (Math.imul(k + 1, 2654435761) ^ 0x5eed) >>> 0;
@@ -25,9 +26,9 @@ function tactics(seed: number, n: number, policy: Policy): TacticOrder[] | undef
   for (let id = 1; id <= n; id++) {
     const style = rng.int(4);
     styleOf.set(id, style); // 0 아끼고 막판 · 1 초반 질주 · 2 따라잡기 위주 · 3 무작위/안 고름
-    for (let w = 1; w <= 3; w++) {
+    for (let w = 1; w <= WN; w++) {
       let t: (typeof TACTIC_TYPES)[number] | null;
-      if (style === 0) t = w < 3 ? 'SAVE' : 'SPRINT';
+      if (style === 0) t = w < WN - 1 ? 'SAVE' : 'SPRINT';
       else if (style === 1) t = w === 1 ? 'SPRINT' : w === 2 ? 'SAVE' : 'SPRINT';
       else if (style === 2) t = 'CHASE';
       else t = rng.chance(1, 3) ? null : TACTIC_TYPES[rng.int(3)]!;

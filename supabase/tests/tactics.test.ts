@@ -45,9 +45,9 @@ beforeEach(async () => {
 });
 
 describe('작전 선택 (서버)', () => {
-  it('SQL 창 시각 = 엔진 창 시각 (30~180초 전부)', async () => {
+  it('SQL 창 시각 = 엔진 창 시각 (v4 3회 · 30~180초 전부)', async () => {
     for (let s = 30; s <= 180; s++) {
-      const w = tacticWindows(s);
+      const w = tacticWindows(s, 4);
       const r = await db.query<{ o: string; c: string }>(
         `select public._tactic_open_ms($1, g) as o, public._tactic_close_ms($1, g) as c from generate_series(1,3) g order by g`,
         [s],
@@ -110,12 +110,43 @@ describe('작전 선택 (서버)', () => {
     await expect(submit(a, race.id, 1, 'SAVE')).rejects.toThrow('TACTIC_CLOSED');
     await expect(submit(newToken(), race.id, 1, 'SAVE')).rejects.toThrow('NOT_JOINED');
     await expect(submit(a, race.id, 1, 'TELEPORT')).rejects.toThrow('BAD_TACTIC');
-    await expect(submit(a, race.id, 4, 'SAVE')).rejects.toThrow('BAD_TACTIC');
+    await expect(submit(a, race.id, 6, 'SAVE')).rejects.toThrow('BAD_TACTIC');
     expect((await reveal(race.id)).closed).toEqual([]);
   });
 
   it('작전 기록 테이블은 외부에서 직접 읽을 수 없다', async () => {
     await expect(db.query(`set role anon; select * from public.race_tactics;`)).rejects.toThrow();
     await db.query('reset role');
+  });
+
+  it('v8: SQL 창 시각 = 엔진 창 시각 (5회 · 30~180초 전부)', async () => {
+    for (let s = 30; s <= 180; s++) {
+      const w = tacticWindows(s, 8);
+      const r = await db.query<{ o: string; c: string }>(
+        `select public._tactic_open_ms_v($1, g, 8) as o, public._tactic_close_ms_v($1, g, 8) as c from generate_series(1,5) g order by g`,
+        [s],
+      );
+      expect(r.rows.map((x) => [Number(x.o), Number(x.c)])).toEqual(w.map((x) => [x.openMs, x.closeMs]));
+    }
+  });
+
+  it('v8 경주: 4·5번째 창에서도 선택 · 5개 모두 공개 / v7 경주는 4번째 창 거부', async () => {
+    const a = newToken();
+    await join(a, '가나');
+    const race = await start(8);
+    const w = tacticWindows(race.race_seconds, 8);
+    for (const k of [3, 4]) {
+      await setElapsed(w[k]!.openMs + 300);
+      await submit(a, race.id, k + 1, 'CHASE');
+    }
+    await setElapsed(w[4]!.closeMs + 400);
+    const rv = await reveal(race.id);
+    expect(rv.closed).toEqual([1, 2, 3, 4, 5]);
+    expect(rv.tactics.map((t) => t.window)).toEqual([4, 5]);
+
+    await db.exec(`update public.game_state set phase = 'lobby', current_race_id = null; delete from public.races;`);
+    const old = await start(7);
+    await setElapsed(tacticWindows(70, 7)[2]!.openMs + 300);
+    await expect(submit(a, old.id, 4, 'CHASE')).rejects.toThrow('BAD_TACTIC');
   });
 });

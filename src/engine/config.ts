@@ -4,7 +4,7 @@
  *    반드시 ENGINE_VERSION 을 올리고 golden 테스트를 갱신할 것.
  *    (3단계부터 서버와 클라이언트가 이 버전으로 일치 여부를 검증한다)
  */
-export const ENGINE_VERSION = 6;
+export const ENGINE_VERSION = 8;
 
 export const MAX_ENTRANTS = 50;
 
@@ -67,6 +67,27 @@ export const FATIGUE_PER_10 = 8;
 export const FATIGUE_PER_10_V6 = 12;
 export const DRAFT_BONUS = 25;
 export const DRAFT_GAP_UNITS = 6_000;
+
+/**
+ * v7 추격 보정 (선두 독주 완화) — scripts/runaway.ts · tactics-impact.ts 로 측정해 정함.
+ * 기준은 순위가 아니라 "바로 앞 말과의 거리 ÷ 트랙 길이" → 경주 시간과 무관하게 같은 밀집도.
+ *  선두가 혼자 달아나면 2위가 따라붙고, 그 뒤 무리도 차례로 따라붙음. 무리 속에서 일부러 처진 말(앞말이 바로 앞)은 보정 없음
+ *  → "아무것도 안 하고 뒤처지기"가 유리해지지 않음
+ *  - freePermil: 이 격차(천분율, 3 = 3m)까지는 보정 없음 → 작은 격차가 생겼다 좁혀지는 흐름은 그대로
+ *  - gain: 여유 구간을 넘은 격차 1‰(1m) 당 목표 속도 +gain‰
+ *  - max: 보정 상한(‰, 80 = +8%)
+ *  - tacticDiv: 가속 작전이 진행 중이면 보정을 이 값으로 나눔 → 작전과 겹쳐 폭발적으로 빨라지지 않게
+ *  - fadeFrom~fadeTo: 선두 진행률(‰) 이 구간에서 보정이 1 → 0 으로 줄어 결승 직전엔 보정 없음 (작전·흐름이 결과에 반영)
+ * 보정은 목표 속도에만 들어가 가속 한도(accel) 안에서 서서히 빨라짐 → 순간 이동 없음, 화면 위치 = 실제 주행 거리
+ */
+export const CATCHUP = {
+  freePermil: 3,
+  gain: 10,
+  max: 80,
+  tacticDiv: 2,
+  fadeFrom: 650,
+  fadeTo: 900,
+} as const;
 
 /** 붉은 말 각성: 선두 진행률이 이 비율(천분율) 이상일 때부터 가능 */
 export const AWAKEN_MIN_PROGRESS = 600;

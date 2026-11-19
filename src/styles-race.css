@@ -518,3 +518,29 @@ button.danger {
   opacity: 0.85;
   text-align: center;
 }
+
+.tac-steps {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+.tac-step {
+  min-width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  font-family: var(--font-title);
+  font-size: 15px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 2px solid rgba(255, 255, 255, 0.2);
+}
+.tac-step.now {
+  background: var(--gold);
+  color: var(--ink);
+  border-color: var(--gold);
+}
+.tac-step.done {
+  background: rgba(123, 228, 149, 0.25);
+  border-color: #7be495;
+}

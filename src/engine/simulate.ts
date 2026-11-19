@@ -13,6 +13,7 @@ import {
   SPURT_MAX,
   SPURT_TOP,
   BASE_SPREAD_V5,
+  CATCHUP,
   DRAFT_BONUS,
   DRAFT_GAP_UNITS,
   FATIGUE_FROM_PERMIL,
@@ -51,6 +52,16 @@ import { validateRaceInput } from './validate';
  */
 export function simulateRace(input: RaceInput): RaceResult {
   return simulateCore(input, ENGINE_VERSION);
+}
+
+/** v7 경주(작전 3회) 재현용 */
+export function simulateRaceV7(input: RaceInput): RaceResult {
+  return simulateCore(input, 7);
+}
+
+/** v6 경주(추격 보정 없음) 재현용 */
+export function simulateRaceV6(input: RaceInput): RaceResult {
+  return simulateCore(input, 6);
 }
 
 /** v5 경주(이전 작전 수치) 재현용 */
@@ -116,6 +127,7 @@ function simulateCore(input: RaceInput, version: number): RaceResult {
   // v4 작전: 말별 체력 · 진행 중 작전 배율 · 창별 주문 (말 번호 → 레인)
   const windows = version >= 4 ? tacticWindows(raceSeconds, version) : [];
   const v6 = version >= 6;
+  const v7 = version >= 7;
   const orders: (TacticType | undefined)[][] = windows.map(() => new Array<TacticType | undefined>(n));
   if (version >= 4 && input.tactics) {
     const laneOf = new Map(entrants.map((e, i) => [e.id, i]));
@@ -245,6 +257,13 @@ function simulateCore(input: RaceInput, version: number): RaceResult {
     }
 
     // 2) 이동
+    // v7 추격 보정: 이번 틱 시작 시점의 선두 위치 (달리는 말 중) · 결승에 가까울수록 보정이 줄어드는 비율
+    let leadPos = 0;
+    if (v7) for (let i = 0; i < n; i++) if (finishTick[i] === -1 && pos[i]! > leadPos) leadPos = pos[i]!;
+    const leadPm = Math.floor((Math.min(leadPos, L) * 1000) / L);
+    const fadeK = v7
+      ? Math.max(0, Math.min(1000, Math.floor(((CATCHUP.fadeTo - leadPm) * 1000) / (CATCHUP.fadeTo - CATCHUP.fadeFrom))))
+      : 0;
     for (let i = 0; i < n; i++) {
       if (finishTick[i] !== -1) {
         // 결승 후에는 감속하며 조금 더 달린다 (연출용, 순위 무관)
@@ -269,7 +288,24 @@ function simulateCore(input: RaceInput, version: number): RaceResult {
       if (mult === 0) {
         speed[i] = Math.max(0, speed[i]! - tune.decel * 2);
       } else {
-        const diff = target[i]! - speed[i]!;
+        // v7: 선두와의 격차(트랙 길이 대비)가 여유 구간을 넘으면 목표 속도를 조금 올림 → 가속 한도 안에서 서서히 따라붙음
+        //     (순간 이동 없음 · 상한 있음 · 작전 중엔 절반 · 결승에 가까울수록 0 으로)
+        let goal = target[i]!;
+        if (v7 && fadeK > 0) {
+          // 기준: 바로 앞 말과의 거리 (무리 속에서 일부러 처진 말은 보정 없음 · 선두가 혼자 달아날 때 2위가 따라붙음)
+          let ahead = Infinity;
+          for (let j = 0; j < n; j++) {
+            if (j === i || finishTick[j] !== -1) continue;
+            const d = pos[j]! - pos[i]!;
+            if (d > 0 && d < ahead) ahead = d;
+          }
+          const gapPm = ahead === Infinity ? 0 : Math.floor((ahead * 1000) / L);
+          let cu = Math.min(CATCHUP.max, Math.max(0, (gapPm - CATCHUP.freePermil) * CATCHUP.gain));
+          if (t < tacEnd[i]! && tacMult[i]! > 1000) cu = Math.floor(cu / CATCHUP.tacticDiv);
+          cu = Math.floor((cu * fadeK) / 1000);
+          if (cu > 0) goal = Math.floor((goal * (1000 + cu)) / 1000);
+        }
+        const diff = goal - speed[i]!;
         speed[i] = speed[i]! + (diff > 0 ? Math.min(diff, tune.accel) : Math.max(diff, -tune.decel));
       }
 
